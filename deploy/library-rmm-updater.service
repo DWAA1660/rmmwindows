@@ -1,0 +1,22 @@
+[Unit]
+Description=Library RMM scoped GitHub update helper
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/library-rmm/updater.env
+Environment=DOCKER_CONFIG=/opt/library-rmm/docker-config
+ExecStart=/usr/bin/python3 /opt/library-rmm/update-helper.py
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/library-rmm /var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target

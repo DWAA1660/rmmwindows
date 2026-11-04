@@ -1,0 +1,74 @@
+name: Build and verify
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  server-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm ci
+        working-directory: server
+      - run: npm test
+        working-directory: server
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
+  agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v4
+        with: {dotnet-version: '10.0.x'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm ci
+        working-directory: server
+      - name: Build Windows agent package
+        shell: pwsh
+        run: ./installer/Build-Agent.ps1
+      - name: Verify replay and output protections
+        shell: pwsh
+        run: dotnet run --project agent/LibraryRmm.Agent.csproj --configuration Release -- --self-test
+      - name: Verify installer target validation
+        shell: pwsh
+        run: ./installer/Test-InstallerPaths.ps1
+      - name: Verify real agent/API integration
+        run: node deploy/test-agent-integration.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: library-rmm-agent-win-x64
+          path: artifacts/*.zip
+  container:
+    needs: [server-web, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build tested container
+        run: docker build --build-arg APP_VERSION=${{ github.sha }} -t library-rmm:verify .
+      - name: Publish GitHub Container Registry image
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_USER: ${{ github.actor }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
+          image="ghcr.io/${GH_REPO,,}"
+          docker tag library-rmm:verify "$image:$GH_SHA"
+          docker tag library-rmm:verify "$image:main"
+          docker push "$image:$GH_SHA"
+          docker push "$image:main"

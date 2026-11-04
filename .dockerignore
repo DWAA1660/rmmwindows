@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/bin
+**/obj
+**/dist
+artifacts
+data
+.env
+.env.*
+**/*.db*
+**/*.log
+agent
+installer
