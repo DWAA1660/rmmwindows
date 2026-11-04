@@ -28,8 +28,6 @@
 - Initial login saved root-only on the host and downloaded into local ignored artifacts/admin-access.txt with ACL restricted to current user and SYSTEM. No credentials are committed.
 - Automatic approval review rejected cleanup of an abandoned isolated test folder under the developer temp directory (`library-rmm-e2e-gzLBS0`) with only `rejected: blocked by policy`, including a safer explicit-file cleanup attempt. It was left intact; contains disposable test DB/config only, not production credentials. No further deletion attempted.
 
-## Current limitations / next milestones
-
 ## 2026-11-04 — Website agent installation
 
 - Added public `/install.ps1`, `/downloads/library-rmm-agent-win-x64.zip`, checksum file, and `/api/agent-download` metadata. Management/enrollment-token creation remains authenticated. Public scripts/artifacts contain no enrollment secret; bootstrap prompts through the existing SecureString installer.
@@ -37,7 +35,8 @@
 - Docker build cross-publishes the .NET 10 Windows x64 service and packages the installer with each app image; avoids private GitHub login on endpoints and keeps web downloads synchronized with source.
 - Bootstrap validates HTTPS origin and expected download path, checks SHA256 before extraction, supports `-DownloadOnly`, and never reboots. Existing endpoint enrollment remains preserved by the underlying installer.
 - Local verification: ten server tests pass (including unauthenticated downloads, management still401, Host header injection resistance, checksum validation/tamper refusal); web TypeScript/production build passes; real Windows PowerShell 5.1 mocked bootstrap checks pass for good download, no execution in DownloadOnly, bad hash refusal before extraction, and foreign URL refusal.
-- Linux Docker cross-publish, live download-only check, browser UI verification and deployment are pending.
+- Linux Docker cross-publish succeeded. First runtime deployment rejected unreadable source files because the privileged updater's private checkout permissions were retained in Docker COPY; automatic rollback restored the previous healthy version. Runtime source/assets now explicitly belong to the non-root node user. A completed-image smoke check was added for bundled ZIP/hash, bootstrap, UI and management authentication.
+- Corrected deployment, live download-only check and browser UI verification are pending.
 
 ## Current limitations / next milestones
 

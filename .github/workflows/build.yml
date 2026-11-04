@@ -61,6 +61,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Build tested container
         run: docker build --build-arg APP_VERSION=${{ github.sha }} -t library-rmm:verify .
+      - name: Verify non-root runtime and public installer package
+        run: docker run --rm --read-only --network none --tmpfs /tmp --entrypoint node library-rmm:verify test/container-smoke.mjs
       - name: Publish GitHub Container Registry image
         if: github.event_name != 'pull_request'
         env:

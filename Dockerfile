@@ -26,11 +26,11 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 APP_VERSION=$APP_VERSION
 WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY server/ ./
-COPY installer/Bootstrap-Agent.ps1 /app/installer/Bootstrap-Agent.ps1
+COPY --chown=node:node server/ ./
+COPY --chown=node:node installer/Bootstrap-Agent.ps1 /app/installer/Bootstrap-Agent.ps1
 RUN npm test
-COPY --from=web-build /build/web/dist /app/web/dist
-COPY --from=agent-package /output /app/downloads
+COPY --from=web-build --chown=node:node /build/web/dist /app/web/dist
+COPY --from=agent-package --chown=node:node /output /app/downloads
 RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 3000
