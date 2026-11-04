@@ -41,14 +41,27 @@
 - Live browser Add endpoints page shows both downloads, package version/size/checksum and the correct three-line command. Copy command changed to “Copied.” Screenshot saved to ignored artifacts/website-agent-install.png. Existing admin session survived deployment/rollback.
 - Final GitHub Actions source run is green across server/web, Windows agent/bootstrap/installer/integration and completed-image smoke/GHCR publication: https://github.com/DWAA1660/rmmwindows/actions/runs/41921368385. All requested website-installation work is deployed and verified; service lifecycle testing on a disposable endpoint remains the preview limitation.
 
-## Current limitations / next milestones
-
 ## 2026-11-04 — Accounts and roles
 
 - Settings now includes own email/password changes and admin user creation, email editing, role selection, disabling/re-enabling and password resets. Roles are administrator, operator and viewer; permissions are enforced by the API including URL case/trailing-slash variants.
 - Additive schema v2 preserves existing account credentials and durable management state. Last-admin protection, sensitive-action current-password confirmation, CSRF/origin checks, rate limits, audit without secrets, immediate session revocation on password/access changes, and case-insensitive unique usernames implemented.
 - Email is contact-only, not a login identifier or verified/reset-email channel. Disabled accounts retain historical attribution; no destructive user deletion route.
-- Local server account lifecycle/migration tests and frontend production compilation pass. Deployment and live UI verification pending.
+- Twelve server tests and frontend production compilation pass. One existing random test port landed in a Windows reserved range; listener setup now retries bind conflicts instead of failing unrelated tests.
+- Deployment 1fdb0d01c30b861b3a7a42875871eeac1bc663a4 is live/healthy. Existing administrator session survived migration; live Settings shows own email/password forms and admin user management. Add user form verified with viewer/operator/admin choices. No production credentials were changed and no test accounts were created on production. Screenshot: ignored artifacts/account-settings-verified.png.
+
+## 2026-11-04 — Live command progress (Claude, continuing Codex handoff)
+
+- User reported SFC/DISM progress appears only after completion. Safe native-child test reproduced buffering of flushed carriage-return progress in the agent's forced PowerShell `Out-String` pipeline; direct PowerShell partial output was already delivered early.
+- Fix 1: wrapper no longer pipes the whole script through `Out-String`; native tools inherit the redirected handles and their partial writes stream immediately.
+- Fix 2: `agent/AdaptiveOutputDecoder.cs` reads raw pipe bytes and switches between UTF-8 (PowerShell, DISM under the UTF-8 console code page) and UTF-16LE (sfc.exe writes raw UTF-16 to pipes). Detection: UTF-16 BOM or two `(ASCII,0x00)` code units; back to UTF-8 after three code units whose bytes are all printable ASCII. Bytes are held only when they could start a switch, so whole progress writes are emitted immediately. Limit: unmarked CJK UTF-16 text could occasionally be misread as UTF-8; documented in the class.
+- Agent self-tests: 12/12 pass, including mixed UTF-8/UTF-16LE decoding at every split point and byte-by-byte, plus synthetic native UTF-8 and UTF-16LE children that must deliver CR progress before exit. No real SFC/DISM repair was run.
+- Web renders carriage-return progress as readable history and shows the latest percentage actually emitted by the command. Original server chunks and full downloads remain unchanged. Two frontend progress tests pass; CI now runs them.
+- Running endpoints keep the old behavior until their agent is upgraded. The production scan that was in flight was not cancelled or replayed.
+
+## 2026-11-04 — Password policy and lockout recovery
+
+- Minimum password length is now 8 (`MIN_PASSWORD_LENGTH` in `server/src/security.mjs`; UI `minLength` matches). Existing passwords are unaffected.
+- Break-glass reset for a locked-out account, run on the Linux host: `docker exec -it library-rmm-rmm-1 node src/reset-password.mjs <username>`. Reads the password from a hidden prompt (or stdin), re-enables the account, revokes its sessions and writes an audit row. Covered by a server test (13/13 pass).
 
 ## Current limitations / next milestones
 

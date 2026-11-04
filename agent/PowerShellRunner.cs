@@ -24,9 +24,13 @@ public sealed class PowerShellRunner
             $OutputEncoding = [Console]::OutputEncoding
             $FormatEnumerationLimit = -1
             $PSDefaultParameterValues['Out-File:Width'] = 32767
+            try { $size = $Host.UI.RawUI.BufferSize; $size.Width = 32767; $Host.UI.RawUI.BufferSize = $size } catch { }
             $global:LASTEXITCODE = 0
             try {
-                & '{{escapedPath}}' | Out-String -Stream -Width 32767
+                # Do not pipe the whole script through a formatting cmdlet: PowerShell then
+                # captures native stdout as line objects and withholds CR/no-newline progress.
+                # Standalone native programs must inherit the redirected output handles.
+                & '{{escapedPath}}'
                 $pipelineSucceeded = $?
                 if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
                 if (-not $pipelineSucceeded) { exit 1 }
@@ -82,7 +86,7 @@ public sealed class PowerShellRunner
         var outputFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         async Task PumpGuardAsync(StreamReader reader, string stream)
         {
-            try { await PumpAsync(reader, stream, onOutput, drainCancellation.Token); }
+            try { await PumpAsync(reader.BaseStream, stream, onOutput, drainCancellation.Token); }
             catch (Exception exception) { outputFailure.TrySetResult(exception); throw; }
         }
         var stdout = PumpGuardAsync(process.StandardOutput, "stdout");
@@ -130,23 +134,31 @@ public sealed class PowerShellRunner
         catch (InvalidOperationException) { }
     }
 
-    private static async Task PumpAsync(StreamReader reader, string stream, Func<string, string, Task> onOutput, CancellationToken ct)
+    private static async Task PumpAsync(Stream source, string stream, Func<string, string, Task> onOutput, CancellationToken ct)
     {
-        var buffer = new char[4096];
-        char? pendingSurrogate = null;
-        while (true)
+        // Read raw bytes so UTF-16LE writers (sfc.exe) and UTF-8 writers (PowerShell, DISM with
+        // the UTF-8 console code page) both decode correctly, and partial progress without a
+        // newline is delivered as soon as the pipe returns it.
+        var decoder = new AdaptiveOutputDecoder();
+        var buffer = new byte[8192];
+        string? pendingSurrogate = null;
+        async Task EmitAsync(string decoded, bool final)
         {
-            var read = await reader.ReadAsync(buffer.AsMemory(), ct);
-            if (read == 0) break;
-            var value = (pendingSurrogate?.ToString() ?? "") + new string(buffer, 0, read);
+            var value = (pendingSurrogate ?? "") + decoded;
             pendingSurrogate = null;
-            if (char.IsHighSurrogate(value[^1]))
+            if (!final && value.Length != 0 && char.IsHighSurrogate(value[^1]))
             {
-                pendingSurrogate = value[^1];
+                pendingSurrogate = value[^1].ToString();
                 value = value[..^1];
             }
             if (value.Length != 0) await onOutput(stream, value);
         }
-        if (pendingSurrogate.HasValue) await onOutput(stream, pendingSurrogate.Value.ToString());
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer.AsMemory(), ct);
+            if (read == 0) break;
+            await EmitAsync(decoder.Decode(buffer.AsSpan(0, read)), final: false);
+        }
+        await EmitAsync(decoder.Flush(), final: true);
     }
 }

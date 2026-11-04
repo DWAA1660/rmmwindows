@@ -29,7 +29,7 @@ PowerShell payload `{script}`. Reboot payload `{delaySeconds:30,reason}` with de
 Accounts: `auth/me` and login return `{id,username,email,role,disabled}` in `user`. Username login is case-insensitive; email is contact-only with no delivery/reset-email service. Roles: `admin` full access including users/audit/app updates; `operator` endpoint/script/schedule actions; `viewer` read-only fleet/output. Own-account routes are available to all enabled roles.
 
 - `PATCH /account {email,currentPassword}` changes own email.
-- `POST /account/password {currentPassword,newPassword}` requires 14–1024 characters and revokes all sessions, including the caller.
+- `POST /account/password {currentPassword,newPassword}` requires 8–1024 characters and revokes all sessions, including the caller.
 - Admin-only `GET /users`, `POST /users {username,email,role,password,currentPassword}`, `PATCH /users/:id {email?,role?,disabled?,password?,currentPassword}`. `currentPassword` is the acting admin's password. Roles/disabling/reset revoke affected sessions immediately. Last enabled admin cannot be disabled/demoted. Accounts are disabled rather than deleted to retain history. No password hashes are returned or audited.
 
 - `GET /health`, `GET /auth/me`, `POST /auth/login {username,password}`, `POST /auth/logout`.
@@ -40,4 +40,4 @@ Accounts: `auth/me` and login return `{id,username,email,role,disabled}` in `use
 - `GET /schedules` array; `POST /schedules {name,scriptId,endpointIds,intervalMinutes,startsAt?,enabled}`; `PATCH /schedules/:id {enabled}`; `DELETE /schedules/:id`. No catch-up replay after downtime, occurrence unique in server ledger.
 - `GET /audit?limit=100`; `GET /settings` -> version/update capability etc; `POST /settings/update` requests app image pull/restart, admin-only; `GET /settings/update` -> helper status.
 
-Operator response entities have string UUID `id`. Endpoint includes `displayName,hostname,lastSeen,online,inventory,tags,revoked`. Job includes `id,endpointId,kind,payload,status,createdAt,startedAt,completedAt,summary,exitCode`. Script includes `id,name,description,body,updatedAt`. Schedule includes `id,name,scriptId,endpointIds,intervalMinutes,nextRunAt,enabled`. Errors `{error:string}` with HTTP status. `GET /auth/me` -> `{user:{username,role:"admin"},csrfToken}` or 401.
+Operator response entities have string UUID `id`. Endpoint includes `displayName,hostname,lastSeen,online,inventory,tags,revoked`. Job includes `id,endpointId,kind,payload,status,createdAt,startedAt,completedAt,summary,exitCode`. Script includes `id,name,description,body,updatedAt`. Schedule includes `id,name,scriptId,endpointIds,intervalMinutes,nextRunAt,enabled`. Errors `{error:string}` with HTTP status. `GET /auth/me` -> `{user:{id,username,email,role:"admin"|"operator"|"viewer",disabled},csrfToken}` or 401.

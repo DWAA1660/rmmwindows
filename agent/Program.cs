@@ -1,6 +1,12 @@
 using LibraryRmm.Agent;
 using Microsoft.Extensions.Hosting;
 
+if (args.Length == 2 && args[0] == "--self-test-native-progress")
+{
+    await AgentSelfTests.RunNativeProgressChildAsync(args[1]);
+    return;
+}
+
 if (args.Contains("--self-test", StringComparer.Ordinal))
 {
     Environment.ExitCode = await AgentSelfTests.RunAsync();

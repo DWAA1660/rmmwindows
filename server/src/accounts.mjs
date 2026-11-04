@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { passwordHash, verifyPassword, rateLimiter } from './security.mjs';
+import { passwordHash, verifyPassword, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 import { transaction } from './db.mjs';
 export const publicUser = row => ({ id: row.user_id || row.id, username: row.username, email: row.email, role: row.role, disabled: Boolean(row.disabled), createdAt: row.created_at });
 
@@ -11,7 +11,7 @@ export function mountAccounts(app, { db, operator, csrf, audit, fail, str }) {
     return result;
   };
   const role = value => { if (!['admin', 'operator', 'viewer'].includes(value)) fail(400, 'Invalid account role.'); return value; };
-  const password = value => passwordHash(str(value, 'password', { min: 14, max: 1024 }));
+  const password = value => passwordHash(str(value, 'password', { min: MIN_PASSWORD_LENGTH, max: 1024 }));
   const confirm = req => {
     const supplied = str(req.body.currentPassword, 'currentPassword', { max: 1024 });
     const current = db.prepare('SELECT * FROM users WHERE id=? AND disabled=0').get(req.operator.user_id);

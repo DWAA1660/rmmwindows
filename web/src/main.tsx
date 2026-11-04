@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { AccountSettings, type AccountUser } from './AccountSettings';
+import { progressOutput } from './progress';
 
 type Disk = {
   name: string;
@@ -3070,6 +3071,7 @@ function JobOutput({
   const cursor = useRef(-1),
     fetching = useRef(false),
     outputRef = useRef<HTMLPreElement>(null);
+  const progress = useMemo(()=>progressOutput(chunks),[chunks]);
   const load = async () => {
     if (fetching.current) return;
     fetching.current = true;
@@ -3284,7 +3286,7 @@ function JobOutput({
       </div>
       <pre className="output-console" ref={outputRef} tabIndex={0}>
         {chunks.length ? (
-          chunks.map((chunk) => (
+          progress.display.map((chunk) => (
             <span key={chunk.sequence} className={`output-${chunk.stream}`}>
               {chunk.text}
             </span>
@@ -3297,6 +3299,7 @@ function JobOutput({
           </span>
         )}
       </pre>
+      {progress.percent!==null && <div className="live-job-progress" role="status"><span>Latest reported progress: <strong>{progress.percent}%</strong></span><progress max={100} value={progress.percent} aria-label="Latest progress reported by command"/></div>}
       {hasMore && (
         <button
           className="button secondary load-more"

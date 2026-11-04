@@ -58,3 +58,21 @@ test('v1 migration preserves the existing account and is repeatable',()=>{
     for(let i=0;i<2;i++){const db=openDatabase(filename);const user=db.prepare('SELECT * FROM users').get();assert.equal(user.role,'admin');assert.equal(user.disabled,0);assert.equal(user.password_hash,'original-hash');assert.equal(db.prepare('PRAGMA user_version').get().user_version,2);db.close();}
   }finally{assert.ok(folder.startsWith(join(tmpdir(),'rmm-account-migration-')));rmSync(folder,{recursive:true,force:true});}
 });
+
+test('8-character passwords are accepted and console reset revokes sessions without exposing the hash', async t => {
+  const { resetPassword } = await import('../src/reset-password.mjs');
+  const { verifyPassword } = await import('../src/security.mjs');
+  const service=createApp({databasePath:':memory:',env:{ADMIN_USERNAME:'admin',ADMIN_PASSWORD:'Short#88'}});
+  t.after(()=>service.close());
+  const db=service.db;
+  assert.ok(db, 'createApp must expose its database for this test');
+  db.prepare("INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) SELECT 'x',id,'y','2999-01-01' FROM users").run();
+  db.prepare('UPDATE users SET disabled=1').run();
+  assert.throws(()=>resetPassword(db,'admin','seven77'),/8-1024/);
+  assert.throws(()=>resetPassword(db,'missing','Long-enough'),/No account/);
+  assert.equal(resetPassword(db,'ADMIN','New#Pass1'),'admin');
+  const row=db.prepare('SELECT * FROM users').get();
+  assert.equal(row.disabled,0); assert.ok(verifyPassword('New#Pass1',row.password_hash));
+  assert.equal(db.prepare('SELECT count(*) n FROM sessions').get().n,0);
+  assert.equal(db.prepare("SELECT count(*) n FROM audit WHERE action='account.password.reset.console'").get().n,1);
+});

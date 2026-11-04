@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
-import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter } from './security.mjs';
+import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
 const parse = (text, fallback = {}) => { try { return JSON.parse(text); } catch { return fallback; } };
@@ -77,9 +77,9 @@ export function createApp(options = {}) {
   const secureCookie = env.COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://');
   const username = env.ADMIN_USERNAME;
   if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
-    if (!username || !env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length < 14) {
+    if (!username || !env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length < MIN_PASSWORD_LENGTH) {
       if (!options.db) db.close();
-      throw new Error('First startup requires ADMIN_USERNAME and ADMIN_PASSWORD of at least 14 characters. No default account is created.');
+      throw new Error(`First startup requires ADMIN_USERNAME and ADMIN_PASSWORD of at least ${MIN_PASSWORD_LENGTH} characters. No default account is created.`);
     }
     db.prepare('INSERT INTO users(id,username,password_hash,created_at) VALUES (?,?,?,?)').run(randomUUID(), str(username, 'ADMIN_USERNAME', { max: 100 }), passwordHash(env.ADMIN_PASSWORD), nowIso());
   }
