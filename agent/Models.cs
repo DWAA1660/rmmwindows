@@ -13,6 +13,8 @@ public sealed record AgentConfiguration
     public int PollSeconds { get; init; } = 10;
     public int InventoryMinutes { get; init; } = 15;
     public bool AllowInsecureLocalhost { get; init; }
+    /// <summary>Startup self-update from the enrolled server. Set "autoUpdate": false in agent.json to pin a version.</summary>
+    public bool AutoUpdate { get; init; } = true;
     [System.Text.Json.Serialization.JsonIgnore]
     public string DataDirectory { get; init; } = DefaultDataDirectory;
     public static string DefaultDataDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LibraryRmm");

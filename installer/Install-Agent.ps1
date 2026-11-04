@@ -160,6 +160,9 @@ if ($existing) {
     if ($serviceInfo.PathName -notlike ('"' + $targetExe + '"*')) { throw 'The service name is already used at another path. Refusing to replace it.' }
     Stop-Service -Name $serviceName -Force
     $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(45))
+    # SCM can report Stopped slightly before the process releases its executable image.
+    $running = Get-Process -Name 'LibraryRmm.Agent' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -eq $targetExe }
+    if ($running) { $running | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue }
 }
 Get-ChildItem -LiteralPath $BinaryDirectory -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $InstallDirectory $_.Name) -Force

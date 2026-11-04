@@ -58,6 +58,20 @@
 - Web renders carriage-return progress as readable history and shows the latest percentage actually emitted by the command. Original server chunks and full downloads remain unchanged. Two frontend progress tests pass; CI now runs them.
 - Running endpoints keep the old behavior until their agent is upgraded. The production scan that was in flight was not cancelled or replayed.
 
+- Regression found and fixed before 0.1.1: commit 8121a8a's wrapper ran the script without `Out-String -Width`, so (a) wide tables were cut at the hidden console's 120 columns with `...`, and (b) the wrapper's `exit` discarded table output the formatter had not flushed yet (a script ending in `Get-Service` could print nothing). The wrapper now widens the hidden console buffer to 32766 columns and runs `& script | Out-Default`, which flushes formatting before `exit` while still letting native tools write progress straight to the pipe. A self-test now covers implicit and explicit wide tables. Endpoints that installed from the website between 8121a8a and 0.1.1 should be upgraded by re-running the install command (or will self-update to 0.1.1 only if they already run 0.1.1+; 8121a8a builds still report 0.1.0 and lack the updater).
+- `$?` semantics for script errors were compared against the old wrapper and are unchanged (non-terminating errors behaved the same; thrown errors exit 1 via the wrapper's catch).
+
+## 2026-11-04 — Agent 0.1.1: automatic update at service startup
+
+- `agent/AgentUpdater.cs`, called first in `AgentWorker.ExecuteAsync` only when running as the Windows service, before recovery, heartbeats or any job claim, so an update never interrupts a command.
+- Flow: GET `/api/agent-download` from the enrolled origin (no redirects, TLS validation on) → accept only a strictly newer plain `x.y.z` win-x64 package at the fixed `/downloads/library-rmm-agent-win-x64.zip` path → persist the attempt in `%ProgramData%\LibraryRmm\updates\update-state.json` BEFORE downloading → stream the download with size and SHA-256 checks → extract with path-traversal and size limits → verify the inner `package-manifest.json` version and agent exe SHA-256 → launch a detached `apply-update.ps1` that runs the package's own `Install-Agent.ps1` (enrollment preserved, only LibraryRmmAgent restarted, never reboots). On failure the helper restarts the existing service. Log: `%ProgramData%\LibraryRmm\updates\update-<version>.log`.
+- Loop protection: max 3 attempts per package digest with 30-minute then 2-hour backoff; a new digest resets the counter. On restore-on-reboot machines the state file is rolled back with the disk, which yields at most one update per boot, never a loop within a boot.
+- If the helper never stops the service within 10 minutes, the old agent resumes normal work. Opt-out per endpoint: `"autoUpdate": false` in `agent.json`.
+- `Install-Agent.ps1` now waits for the old agent process to exit after the service stops before copying files.
+- Version bumped to 0.1.1 (`agent/LibraryRmm.Agent.csproj`); `Build-Agent.ps1` now defaults to that version and works under Windows PowerShell 5.1.
+- Tests: 14/14 agent self-tests (source build and the packaged single-file exe), including version ordering, manifest validation, backoff/attempt limits, verified staging, tampered archive, traversal, inner-version and exe-hash rejection. Integration test passes (teardown now retries a briefly locked folder). NOT yet verified: a real service-to-service update on a disposable VM.
+- Existing 0.1.0 agents have no updater. Each needs one manual upgrade by re-running the website install command (identity is preserved). After that, every service start checks for updates.
+
 ## 2026-11-04 — Password policy and lockout recovery
 
 - Minimum password length is now 8 (`MIN_PASSWORD_LENGTH` in `server/src/security.mjs`; UI `minLength` matches). Existing passwords are unaffected.

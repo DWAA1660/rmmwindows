@@ -118,5 +118,6 @@ try {
   service.close();
   const target = resolve(temp);
   assert.ok(target.startsWith(resolve(tmpdir()) + sep) && target.split(sep).at(-1).startsWith('library-rmm-e2e-'));
-  await rm(target, { recursive: true, force: true });
+  // A killed agent's short-lived PowerShell child can hold its working folder briefly.
+  await rm(target, { recursive: true, force: true, maxRetries: 20, retryDelay: 500 });
 }

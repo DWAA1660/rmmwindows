@@ -1,12 +1,19 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0',
+    # Defaults to <Version> in agent/LibraryRmm.Agent.csproj so packages and binaries never drift.
+    [string]$Version = '',
     [ValidateSet('win-x64', 'win-arm64')][string]$Runtime = 'win-x64',
     [string]$DotnetPath = 'dotnet',
-    [string]$OutputDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts')
+    [string]$OutputDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 does not populate $PSScriptRoot inside param() defaults.
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts' }
+if (-not $Version) {
+    $projectXml = [xml](Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'agent\LibraryRmm.Agent.csproj'))
+    $Version = $projectXml.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+}
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][A-Za-z0-9.-]+)?$') { throw 'Version must be a semantic version without path characters.' }
 $sdkVersion = & $DotnetPath --version
 if ($LASTEXITCODE -ne 0 -or $sdkVersion -notmatch '^10\.') { throw 'Building the agent requires the supported .NET 10 SDK. Use -DotnetPath to select it.' }

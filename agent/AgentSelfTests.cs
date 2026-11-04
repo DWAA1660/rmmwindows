@@ -1,6 +1,7 @@
 using System.Net;
 using System.Diagnostics;
 using System.Text;
+using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace LibraryRmm.Agent;
@@ -23,7 +24,9 @@ internal static class AgentSelfTests
             ("native UTF-8 progress arrives live without a newline", () => NativeLiveOutputAsync("utf8")),
             ("native UTF-16LE progress arrives live without NUL corruption", () => NativeLiveOutputAsync("utf16le")),
             ("PowerShell timeout terminates command and reports interruption", PowerShellTimeoutAsync),
-            ("unsafe storage paths are rejected", StoragePathAsync)
+            ("unsafe storage paths are rejected", StoragePathAsync),
+            ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
+            ("updater stages only verified packages and never loops", UpdaterStagingAsync)
         };
         var failed = 0;
         foreach (var test in tests)
@@ -90,6 +93,24 @@ internal static class AgentSelfTests
             Assert(result.ExitCode == 0 && !result.Interrupted, "PowerShell did not exit successfully.");
             Assert(stdout.ToString().Contains(new string('Z', 150000) + "🙂中文", StringComparison.Ordinal), "Long/Unicode output was shortened.");
             Assert(stderr.ToString().Contains("stderr-test", StringComparison.Ordinal), "stderr was not captured.");
+
+            // Wide objects must not be cut to a console width, whether formatted implicitly
+            // (default table view) or explicitly with Format-Table. The old wrapper guaranteed
+            // this with Out-String -Width; the current one widens the hidden console buffer.
+            foreach (var script in new[]
+                     {
+                         "[pscustomobject]@{ Name = ('w' * 400); Path = 'C:\\' + ('p' * 300); Marker = 'table-end' }",
+                         "[pscustomobject]@{ Name = ('w' * 400); Path = 'C:\\' + ('p' * 300); Marker = 'table-end' }, [pscustomobject]@{ Name = 'b'; Path = 'c'; Marker = 'row2' } | Format-Table -AutoSize"
+                     })
+            {
+                var formatted = new StringBuilder();
+                var table = await new PowerShellRunner().RunScriptAsync(script, directory,
+                    (_, text) => { formatted.Append(text); return Task.CompletedTask; }, 30, CancellationToken.None);
+                var text = formatted.ToString();
+                Assert(table.ExitCode == 0 && text.Contains(new string('w', 400), StringComparison.Ordinal) && text.Contains(new string('p', 300), StringComparison.Ordinal)
+                    && text.Contains("table-end", StringComparison.Ordinal) && !text.Contains("...", StringComparison.Ordinal),
+                    $"Formatted output was truncated ({text.Length} chars): " + JsonSerializer.Serialize(text.Replace("  ", "")));
+            }
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -151,7 +172,7 @@ internal static class AgentSelfTests
             var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Missing test process path.");
             var command = "& '" + executable.Replace("'", "''", StringComparison.Ordinal) + "' ";
             if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-                command += "'" + typeof(AgentSelfTests).Assembly.Location.Replace("'", "''", StringComparison.Ordinal) + "' ";
+                command += "'" + Path.Combine(AppContext.BaseDirectory, "LibraryRmm.Agent.dll").Replace("'", "''", StringComparison.Ordinal) + "' ";
             command += "--self-test-native-progress " + encoding;
             var resultTask = new PowerShellRunner().RunScriptAsync(command, directory,
                 (stream, text) =>
@@ -259,6 +280,121 @@ internal static class AgentSelfTests
         return path;
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+
+    private static Task UpdaterVersionRulesAsync()
+    {
+        Assert(AgentUpdater.IsNewer("0.1.1", "0.1.0") && AgentUpdater.IsNewer("0.10.0", "0.9.9") && AgentUpdater.IsNewer("1.0.0", "0.1.0-dev"), "Newer version rejected.");
+        Assert(!AgentUpdater.IsNewer("0.1.0", "0.1.0") && !AgentUpdater.IsNewer("0.0.9", "0.1.0") && !AgentUpdater.IsNewer("0.2.0-beta", "0.1.0") && !AgentUpdater.IsNewer("x", "0.1.0"),
+            "Equal, older, prerelease or malformed version accepted.");
+        var sha = new string('a', 64);
+        var good = new AgentPackageManifest("0.1.1", "win-x64", sha, 10, AgentUpdater.DownloadPath);
+        AgentUpdater.ValidateManifest(good);
+        foreach (var bad in new[] { good with { Runtime = "win-arm64" }, good with { DownloadUrl = "https://evil.test/a.zip" }, good with { DownloadUrl = "/downloads/other.zip" },
+                     good with { Sha256 = "ABC" }, good with { SizeBytes = 0 }, good with { Version = "latest" } })
+        {
+            var rejected = false;
+            try { AgentUpdater.ValidateManifest(bad); } catch (InvalidDataException) { rejected = true; }
+            Assert(rejected, "Unsafe package manifest accepted: " + bad);
+        }
+        var now = DateTimeOffset.UtcNow;
+        Assert(AgentUpdater.MayAttempt(null, good, now), "First attempt refused.");
+        Assert(!AgentUpdater.MayAttempt(new("0.1.1", sha, 1, now.AddMinutes(-10)), good, now), "Retry ignored 30-minute backoff.");
+        Assert(AgentUpdater.MayAttempt(new("0.1.1", sha, 1, now.AddMinutes(-31)), good, now), "Retry refused after backoff.");
+        Assert(!AgentUpdater.MayAttempt(new("0.1.1", sha, 2, now.AddMinutes(-60)), good, now), "Second retry ignored 2-hour backoff.");
+        Assert(!AgentUpdater.MayAttempt(new("0.1.1", sha, 3, now.AddDays(-30)), good, now), "Attempt limit ignored.");
+        Assert(AgentUpdater.MayAttempt(new("0.1.1", sha, 3, now), good with { Sha256 = new string('b', 64) }, now), "A new package digest was blocked by an old failure.");
+        return Task.CompletedTask;
+    }
+
+    private static byte[] BuildPackage(string version, byte[] executable, string? extraEntry = null, string? agentHash = null)
+    {
+        using var memory = new MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            void Add(string name, byte[] data) { using var entry = zip.CreateEntry(name).Open(); entry.Write(data); }
+            Add("agent/LibraryRmm.Agent.exe", executable);
+            Add("Install-Agent.ps1", Encoding.UTF8.GetBytes("# test installer; never executed by self-tests"));
+            Add("package-manifest.json", JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                version, runtime = "win-x64", agentSha256 = agentHash ?? Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(executable))
+            }));
+            if (extraEntry is not null) Add(extraEntry, [1, 2, 3]);
+        }
+        return memory.ToArray();
+    }
+
+    private static async Task UpdaterStagingAsync()
+    {
+        var directory = CreateTemp();
+        try
+        {
+            var executable = Encoding.UTF8.GetBytes("not a real executable");
+            var package = BuildPackage("0.9.0", executable);
+            var handler = new PackageHandler(package, new AgentPackageManifest("0.9.0", "win-x64",
+                Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(package)), package.Length, AgentUpdater.DownloadPath));
+            var now = DateTimeOffset.UtcNow;
+            using var updater = new AgentUpdater(TestConfiguration(directory), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, handler, () => now);
+            Assert(await updater.PrepareAsync("0.9.0", CancellationToken.None) is null && handler.Downloads == 0, "Equal version downloaded a package.");
+            var staged = await updater.PrepareAsync("0.1.0", CancellationToken.None);
+            Assert(staged is not null && File.ReadAllBytes(Path.Combine(staged.Directory, "agent", "LibraryRmm.Agent.exe")).SequenceEqual(executable), "Verified package was not staged.");
+            Assert(updater.ReadState() is { Attempts: 1, Version: "0.9.0" }, "Attempt was not persisted.");
+            Assert(handler.Paths.All(path => path is "/api/agent-download" or AgentUpdater.DownloadPath), "Updater contacted an unexpected path.");
+            Assert(await updater.PrepareAsync("0.1.0", CancellationToken.None) is null && handler.Downloads == 1, "Immediate retry ignored backoff (restart loop risk).");
+
+            // Tampered archive: digest mismatch is rejected and nothing is staged.
+            var tamperDirectory = CreateTemp();
+            try
+            {
+                var tampered = (byte[])package.Clone();
+                tampered[^5] ^= 0xFF;
+                var badHandler = new PackageHandler(tampered, handler.Manifest);
+                using var badUpdater = new AgentUpdater(TestConfiguration(tamperDirectory), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, badHandler);
+                var rejected = false;
+                try { await badUpdater.PrepareAsync("0.1.0", CancellationToken.None); } catch (InvalidDataException) { rejected = true; }
+                Assert(rejected && Directory.GetDirectories(Path.Combine(tamperDirectory, "updates")).Length == 0, "Tampered package was staged.");
+                Assert(badUpdater.ReadState() is { Attempts: 1 }, "Failed attempt was not counted.");
+            }
+            finally { Directory.Delete(tamperDirectory, true); }
+
+            // Path traversal, inner version mismatch and executable hash mismatch are refused.
+            foreach (var (bytes, label) in new[]
+                     {
+                         (BuildPackage("0.9.0", executable, extraEntry: "../escaped.txt"), "traversal"),
+                         (BuildPackage("0.8.0", executable), "inner version"),
+                         (BuildPackage("0.9.0", executable, agentHash: new string('0', 64)), "executable hash")
+                     })
+            {
+                var archive = Path.Combine(directory, label.Replace(' ', '-') + ".zip");
+                File.WriteAllBytes(archive, bytes);
+                var target = Path.Combine(directory, "extract-" + label.Replace(' ', '-'));
+                var refused = false;
+                try { AgentUpdater.ExtractVerified(archive, target, "0.9.0"); } catch (InvalidDataException) { refused = true; }
+                Assert(refused && !File.Exists(Path.Combine(directory, "escaped.txt")), $"Unsafe package ({label}) accepted.");
+            }
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private sealed class PackageHandler(byte[] package, AgentPackageManifest manifest) : HttpMessageHandler
+    {
+        public AgentPackageManifest Manifest => manifest;
+        public List<string> Paths { get; } = [];
+        public int Downloads { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            Paths.Add(path);
+            if (request.RequestUri.Host != "example.test") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            if (path == "/api/agent-download")
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(manifest, options: AgentConfiguration.Json) });
+            if (path == AgentUpdater.DownloadPath)
+            {
+                Downloads++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(package) });
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+    }
 
     private sealed class RecordingHandler : HttpMessageHandler
     {

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 
 namespace LibraryRmm.Agent;
@@ -9,6 +10,15 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Startup self-update happens BEFORE recovery, heartbeats or job claims, so it can never
+        // interrupt a command. Console/test runs are never updated.
+        if (WindowsServiceHelpers.IsWindowsService() &&
+            await AgentUpdater.TryBeginUpdateAsync(configuration, logger, stoppingToken))
+        {
+            try { await Task.Delay(TimeSpan.FromMinutes(10), stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            logger.LogWarning("Update helper did not restart the service within 10 minutes; continuing with installed agent {Version}.", AgentVersion.Value);
+        }
         await spool.RecoverInterruptedAsync();
         var heartbeat = HeartbeatLoopAsync(stoppingToken);
         var uploads = UploadLoopAsync(stoppingToken);

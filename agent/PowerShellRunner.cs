@@ -24,13 +24,24 @@ public sealed class PowerShellRunner
             $OutputEncoding = [Console]::OutputEncoding
             $FormatEnumerationLimit = -1
             $PSDefaultParameterValues['Out-File:Width'] = 32767
-            try { $size = $Host.UI.RawUI.BufferSize; $size.Width = 32767; $Host.UI.RawUI.BufferSize = $size } catch { }
+            # Objects reach the host through Out-Default, which formats to the hidden console's
+            # buffer width (120) and cuts wide tables with "...". Widen the buffer; keep the
+            # height at the window height so the buffer stays within console memory limits.
+            # (Piping the whole script through Out-String -Width instead would buffer native
+            # progress until each newline, which hides SFC/DISM progress.)
+            foreach ($width in 32766, 16384, 8192, 4096) {
+                try {
+                    $raw = $Host.UI.RawUI
+                    $raw.BufferSize = New-Object System.Management.Automation.Host.Size($width, [Math]::Max($raw.WindowSize.Height, 1))
+                    break
+                } catch { }
+            }
             $global:LASTEXITCODE = 0
             try {
                 # Do not pipe the whole script through a formatting cmdlet: PowerShell then
                 # captures native stdout as line objects and withholds CR/no-newline progress.
                 # Standalone native programs must inherit the redirected output handles.
-                & '{{escapedPath}}'
+                & '{{escapedPath}}' | Out-Default
                 $pipelineSucceeded = $?
                 if ($global:LASTEXITCODE -ne 0) { exit $global:LASTEXITCODE }
                 if (-not $pipelineSucceeded) { exit 1 }

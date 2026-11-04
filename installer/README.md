@@ -20,6 +20,12 @@ To check download/checksum/extraction without enrollment, services or administra
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -DownloadOnly
 ```
 
+## Automatic updates (agent 0.1.1 and later)
+
+Each time the **Library RMM Agent** service starts, before it accepts any job, it asks this server for the hosted package. If a newer version is published, it downloads it from the same server, verifies the SHA-256 and the agent executable hash, and runs the package's own installer to replace itself. Enrollment is preserved, only the agent service restarts, and the computer is never rebooted. A package that fails is retried at most three times (after 30 minutes, then 2 hours). Progress is logged to `%ProgramData%\LibraryRmm\updates\update-<version>.log`.
+
+Agents on 0.1.0 do not have this feature: re-run the install command above once on each endpoint (after any running job finishes) to upgrade to 0.1.1. To pin an endpoint to its current version, add `"autoUpdate": false` to `%ProgramData%\LibraryRmm\agent.json` and restart the service.
+
 ## Install from an extracted release ZIP
 
 Extract the release zip into a local folder. In an **administrator Windows PowerShell** window:
