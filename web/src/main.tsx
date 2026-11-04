@@ -48,6 +48,7 @@ import { progressOutput } from './progress';
 import { JoinRequests, type JoinRequest } from './JoinRequests';
 import { EndpointPicker } from './EndpointPicker';
 import { BatchResults } from './BatchResults';
+import { FileExplorer } from './FileExplorer';
 
 type Disk = {
   name: string;
@@ -500,6 +501,7 @@ function App() {
     [softwareSearch, setSoftwareSearch] = useState("");
   const [jobDetail, setJobDetail] = useState<Job | null>(null),
     [batch, setBatch] = useState<Job[] | null>(null),
+    [explorer, setExplorer] = useState<Endpoint | null>(null),
     [command, setCommand] = useState<{
       ids: string[];
       kind: string;
@@ -2299,13 +2301,14 @@ function App() {
                 <h3>Disks & storage</h3>
                 <button
                   className="text-button"
+                  disabled={detail.revoked}
                   onClick={() => {
-                    openCommand("storage", [detail.id]);
+                    setExplorer(detail);
                     setDetail(null);
                   }}
                 >
                   <FolderSearch size={15} />
-                  Explore storage
+                  Browse files
                 </button>
               </div>
               {detail.inventory?.disks?.length ? (
@@ -2833,6 +2836,24 @@ function App() {
               }}
             />
           )}
+        </Modal>
+      )}
+      {explorer && user && (
+        <Modal
+          title={`Files · ${endpointName(explorer)}`}
+          subtitle="Each action runs once on the computer. Deletes are permanent."
+          wide
+          onClose={() => setExplorer(null)}
+        >
+          <FileExplorer
+            endpoint={{
+              id: explorer.id,
+              name: endpointName(explorer),
+              online: endpoints.find((ep) => ep.id === explorer.id)?.online ?? explorer.online,
+            }}
+            request={api}
+            canWrite={user.role !== "viewer"}
+          />
         </Modal>
       )}
       {batch && (

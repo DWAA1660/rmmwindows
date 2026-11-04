@@ -1,5 +1,6 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,7 @@ import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
+import { mountFiles, validateFilesPayload } from './files.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -73,7 +75,11 @@ function canonicalInventory(input, previousHostname) {
 
 export function createApp(options = {}) {
   const env = options.env || process.env;
-  const db = options.db || openDatabase(options.databasePath || env.DATABASE_PATH || resolve('data/rmm.db'));
+  const databasePath = options.databasePath || env.DATABASE_PATH || resolve('data/rmm.db');
+  const db = options.db || openDatabase(databasePath);
+  // Downloaded endpoint files live beside the database (persistent volume), never in the web root.
+  const fileDirectory = options.fileDirectory !== undefined ? options.fileDirectory
+    : options.db || databasePath === ':memory:' ? null : resolve(dirname(databasePath), 'files');
   const publicOrigin = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).origin : null;
   const secureCookie = env.COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://');
   const username = env.ADMIN_USERNAME;
@@ -98,7 +104,9 @@ export function createApp(options = {}) {
   });
   app.use(express.json({ limit: '2mb', strict: true }));
   mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
-  app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
+  // Agent file-download chunks are the only raw (non-JSON) bodies; their route parses them itself.
+  const rawFileChunk = req => req.method === 'PUT' && /^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) && req.is('application/octet-stream');
+  app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
   const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
   const expectedOrigin = req => publicOrigin || `http://${req.headers.host}`;
   function checkOrigin(req, res, next) {
@@ -150,11 +158,18 @@ export function createApp(options = {}) {
       if (!/^[a-zA-Z]:\\/.test(path) || path.includes('\0')) fail(400, 'Storage path must be an absolute local Windows path such as C:\\Users.');
       return { path };
     }
+    if (kind === 'files') return validateFilesPayload(payload, { fail, str });
     fail(400, 'Unsupported job kind.');
   }
+  // Long-poll claims wait on this per-endpoint signal (plus a periodic re-check as a safety net).
+  const jobSignals = new EventEmitter();
+  jobSignals.setMaxListeners(0);
+  const claimWaiters = new Set();
   function insertJob(endpointId, kind, payload, timeoutSeconds, actor, occurrenceKey = null) {
     const id = randomUUID();
     db.prepare('INSERT INTO jobs(id,endpoint_id,kind,payload,timeout_seconds,status,created_at,created_by,occurrence_key) VALUES (?,?,?,?,?,?,?,?,?)').run(id, endpointId, kind, JSON.stringify(payload), timeoutSeconds, 'queued', nowIso(), actor, occurrenceKey);
+    // Wake a long-polling claim for this endpoint. Deferred so the caller's transaction commits first.
+    setImmediate(() => jobSignals.emit(endpointId));
     return jobView(getJob(id));
   }
 
@@ -214,18 +229,47 @@ export function createApp(options = {}) {
     } else db.prepare('UPDATE endpoints SET last_seen=?,boot_id=? WHERE id=?').run(now, bootId, req.endpoint.id);
     res.json({ endpointId: req.endpoint.id, serverTime: now });
   });
-  agentRouter.post('/jobs/claim', (req, res) => {
-    const result = transaction(db, () => {
-      const row = db.prepare("SELECT * FROM jobs WHERE endpoint_id=? AND status='queued' ORDER BY created_at,id LIMIT 1").get(req.endpoint.id);
-      if (!row) return { job: null };
-      const dispatchToken = randomToken();
-      // Never put a dispatched job back in queued. Durable server state survives
-      // endpoint rollback and is authoritative even if the claim response is lost.
-      db.prepare("UPDATE jobs SET status='dispatched',dispatched_at=?,dispatch_hash=? WHERE id=? AND status='queued'").run(nowIso(), hashToken(dispatchToken), row.id);
-      audit(`agent:${req.endpoint.id}`, 'job.dispatched', row.id);
-      return { job: { id: row.id, kind: row.kind, payload: parse(row.payload), dispatchToken, timeoutSeconds: row.timeout_seconds } };
+  const claimOnce = endpointId => transaction(db, () => {
+    const row = db.prepare("SELECT * FROM jobs WHERE endpoint_id=? AND status='queued' ORDER BY created_at,id LIMIT 1").get(endpointId);
+    if (!row) return { job: null };
+    const dispatchToken = randomToken();
+    // Never put a dispatched job back in queued. Durable server state survives
+    // endpoint rollback and is authoritative even if the claim response is lost.
+    db.prepare("UPDATE jobs SET status='dispatched',dispatched_at=?,dispatch_hash=? WHERE id=? AND status='queued'").run(nowIso(), hashToken(dispatchToken), row.id);
+    audit(`agent:${endpointId}`, 'job.dispatched', row.id);
+    return { job: { id: row.id, kind: row.kind, payload: parse(row.payload), dispatchToken, timeoutSeconds: row.timeout_seconds } };
+  });
+  agentRouter.post('/jobs/claim', async (req, res) => {
+    // {} keeps the original immediate answer. {waitSeconds:1-25} long-polls: the request is held
+    // until a job is queued for this endpoint or the wait elapses. The claim itself is the same
+    // atomic transaction either way, so a job is still consumed exactly once.
+    const waitSeconds = req.body.waitSeconds === undefined ? 0 : integer(req.body.waitSeconds, 'waitSeconds', 1, 25);
+    const endpointId = req.endpoint.id;
+    let result = claimOnce(endpointId);
+    if (result.job || !waitSeconds) return res.json(result);
+    const disconnected = () => res.destroyed || res.writableEnded || req.socket.destroyed;
+    await new Promise(resolve => {
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true;
+        clearTimeout(timer); clearInterval(recheck);
+        jobSignals.off(endpointId, attempt); res.off('close', finish); claimWaiters.delete(finish);
+        resolve();
+      };
+      // Never consume a job for a client that already went away; it stays queued for the next claim.
+      const attempt = () => {
+        if (done) return;
+        if (disconnected()) return finish();
+        try { result = claimOnce(endpointId); } catch { return finish(); }
+        if (result.job) finish();
+      };
+      const timer = setTimeout(finish, waitSeconds * 1000);
+      const recheck = setInterval(attempt, 2000);
+      jobSignals.on(endpointId, attempt);
+      res.on('close', finish);
+      claimWaiters.add(finish);
     });
-    res.json(result);
+    if (!disconnected()) res.json(result);
   });
   function ownedJob(req) {
     const job = db.prepare('SELECT * FROM jobs WHERE id=? AND endpoint_id=?').get(req.params.id, req.endpoint.id);
@@ -290,6 +334,9 @@ export function createApp(options = {}) {
     });
     res.json({ ok: true });
   });
+  const files = mountFiles({ db, audit, fail, str, integer, directory: fileDirectory,
+    maxFileBytes: options.maxFileBytes, maxTotalBytes: options.maxTotalFileBytes, retentionMs: options.fileRetentionMs });
+  files.mountAgent(agentRouter);
   app.use('/api/agent', agentRouter);
 
   const admin = express.Router();
@@ -358,6 +405,8 @@ export function createApp(options = {}) {
       const jobs = ids.map(id => insertJob(id, kind, payload, timeoutSeconds, req.operator.username));
       if (scopedKey) db.prepare('INSERT INTO job_requests VALUES (?,?,?,?)').run(scopedKey, requestHash, JSON.stringify(jobs.map(job => job.id)), nowIso());
       audit(req.operator.username, 'jobs.created', null, { jobIds: jobs.map(job => job.id), kind, endpointIds: ids });
+      // File explorer operations get their own audit entry with the exact paths involved.
+      if (kind === 'files') audit(req.operator.username, `files.${payload.action}`, jobs.length === 1 ? jobs[0].id : null, { jobIds: jobs.map(job => job.id), endpointIds: ids, ...payload });
       return { jobs, duplicate: false };
     }); res.status(result.duplicate ? 200 : 201).json(result);
   });
@@ -468,6 +517,7 @@ export function createApp(options = {}) {
     const result = await updateRequest('POST', '/update'); res.status(202).json(result);
   });
   mountJoinConsole(admin);
+  files.mountConsole(admin);
   app.use('/api', admin);
   app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found.' }));
   const webPath = options.webPath || resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist');
@@ -511,5 +561,7 @@ export function createApp(options = {}) {
       }
     });
   }
-  return { app, db, tickSchedules, close: () => db.close() };
+  // Answer every held long-poll claim with {job:null} (used on shutdown so the listener can close).
+  const releaseClaimWaiters = () => { for (const finish of [...claimWaiters]) finish(); };
+  return { app, db, tickSchedules, releaseClaimWaiters, cleanupFiles: files.cleanup, close: () => { releaseClaimWaiters(); files.close(); db.close(); } };
 }

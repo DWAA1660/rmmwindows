@@ -3631,3 +3631,79 @@ td:last-child {
 .batch-card progress { width:100%;height:6px;accent-color:#168376; }
 .batch-output { margin:0;height:190px;overflow:auto;background:#142a30;color:#d7e6e2;font:11px/1.45 ui-monospace,Consolas,monospace;padding:10px 12px;white-space:pre-wrap;word-break:break-word; }
 @media (max-width:720px) { .batch-grid { grid-template-columns:1fr; } }
+/* Remote file explorer */
+.fx { display:flex;flex-direction:column;gap:10px;min-width:0; }
+.fx-banner { display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:6px;background:#fbf3e4;color:#8a6420;font-size:12px; }
+.fx-nav { display:flex;flex-wrap:wrap;align-items:center;gap:6px; }
+.fx-icon { border:1px solid #dce4e6;background:#fff;min-width:33px;min-height:33px; }
+.fx-icon:disabled { opacity:.45;cursor:not-allowed; }
+.fx-crumbs { display:flex;flex-wrap:wrap;align-items:center;gap:2px;flex:1 1 260px;min-width:0;padding:4px 8px;border:1px solid #dce4e6;border-radius:6px;background:#fff;min-height:33px; }
+.fx-crumb { display:inline-flex;align-items:center;color:#9aaeb2;min-width:0; }
+.fx-crumb button { display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;padding:3px 5px;border-radius:4px;color:#31665a;font-size:12px;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.fx-crumb button:hover { background:#edf6f1; }
+.fx-crumb button.current { color:#23353b; }
+.fx-path { flex:1 1 200px;min-width:0; }
+.fx-path input { width:100%;min-height:33px;border:1px solid #dce4e6;border-radius:6px;padding:6px 9px;font:12px ui-monospace,Consolas,monospace;color:#23353b;background:#fbfdfd; }
+.fx-toolbar { display:flex;flex-wrap:wrap;gap:6px;align-items:center; }
+.fx-toolbar .button:disabled { opacity:.45;cursor:not-allowed; }
+.fx-toolbar-spacer { flex:1; }
+.fx-danger:not(:disabled) { color:#a04d3e; }
+.fx-clipboard { display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:6px;background:#eef5f8;color:#3f6670;font-size:11px; }
+.fx-clipboard span { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.fx-status { display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;background:#edf6f1;color:#31665a;font-size:12px; }
+.fx-status .text-button { margin-left:auto; }
+.fx-message { margin:0; }
+.fx-notice { color:#31665a;font-size:12px;padding:2px; }
+.fx-failures { border:1px solid #efd3cd;background:#fdf5f3;border-radius:6px;padding:10px 12px;font-size:12px;color:#7c3d33; }
+.fx-failures ul { margin:6px 0;padding-left:18px;max-height:160px;overflow:auto; }
+.fx-failures li { margin:3px 0;overflow-wrap:anywhere; }
+.fx-failures code { font-size:11px; }
+.fx-failure-actions,.fx-dialog-actions { display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end; }
+.fx-dialog { border:1px solid #dce4e6;background:#f8fbfb;border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:12px; }
+.fx-dialog p { margin:0;color:#6b7a78; }
+.fx-dialog form { display:flex;flex-direction:column;gap:10px; }
+.fx-dialog label { display:flex;flex-direction:column;gap:6px;font-weight:600;color:#465c61; }
+.fx-dialog input:not([type=checkbox]) { min-height:35px;border:1px solid #dce4e6;border-radius:6px;padding:6px 9px;font:inherit; }
+.fx-dialog .fx-check { flex-direction:row;align-items:flex-start;font-weight:400; }
+.fx-delete-list { margin:0;padding:8px 10px;list-style:none;max-height:160px;overflow:auto;background:#fff;border:1px solid #e6ecee;border-radius:6px;font:11px ui-monospace,Consolas,monospace;color:#465c61; }
+.fx-delete-list li { display:flex;align-items:center;gap:6px;padding:2px 0;overflow-wrap:anywhere; }
+.fx-delete-list svg { flex:none; }
+.fx-empty { display:flex;align-items:center;gap:8px;padding:24px 4px;color:#6b7a78;font-size:12px; }
+.fx-drives { display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px; }
+.fx-drive { display:flex;gap:12px;align-items:flex-start;text-align:left;border:1px solid #dfe5e3;border-radius:8px;background:#fff;padding:12px 14px;color:inherit;cursor:pointer; }
+.fx-drive:hover:not(:disabled) { border-color:#9fcbbd;background:#f7fbf9; }
+.fx-drive:disabled { opacity:.55;cursor:not-allowed; }
+.fx-drive-icon { color:#168376;display:inline-flex;padding-top:2px; }
+.fx-drive-text { display:flex;flex-direction:column;gap:4px;flex:1;min-width:0; }
+.fx-drive-text strong { font-size:13px;color:#23353b; }
+.fx-drive-text small { font-size:11px;color:#6b7a78; }
+.fx-drive-text .progress-track { height:5px;margin-top:4px; }
+.fx-table-wrap { max-height:min(56vh,560px);border:1px solid #e6ecee;border-radius:8px;background:#fff; }
+.fx-table th { position:sticky;top:0;z-index:1;padding:8px 10px; }
+.fx-table td { padding:7px 10px;font-size:12px;color:#465c61;white-space:nowrap; }
+.fx-table th:first-child,.fx-table td:first-child { padding-left:12px; }
+.fx-check-cell { width:36px; }
+.fx-sort { border:0;background:transparent;padding:0;font:inherit;letter-spacing:inherit;color:inherit;cursor:pointer; }
+.fx-folder-row { cursor:pointer; }
+.fx-folder-row:hover { background:#f4faf7 !important; }
+.fx-selected, .fx-selected:hover { background:#e9f4ef !important; }
+.fx-hidden td { opacity:.65; }
+.fx-table td.fx-col-name { width:55%;white-space:normal; }
+.fx-name { display:inline-flex;align-items:center;gap:7px;min-width:0;color:#23353b;text-align:left; }
+.fx-name > span { overflow-wrap:anywhere; }
+.fx-name svg { flex:none;color:#8aa3a8; }
+.fx-folder { border:0;background:transparent;padding:0;font:inherit;color:#1f6f63;font-weight:600;cursor:pointer; }
+.fx-folder svg:first-child { color:#d29b37; }
+.fx-folder:hover > span { text-decoration:underline; }
+.fx-table .fx-col-size { text-align:right; }
+.fx-table td.fx-empty-row { text-align:center;color:#8a9a9e;padding:22px; }
+.fx-more { align-self:center; }
+.fx-footer { display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;font-size:11px;color:#7d8f93; }
+@media (max-width:720px) {
+  .fx-table .fx-col-modified,.fx-table .fx-col-type { display:none; }
+  .table-scroll table.fx-table { min-width:0; }
+  .fx-toolbar .button { flex:1 1 calc(33% - 6px);padding-inline:6px; }
+  .fx-toolbar-spacer { display:none; }
+  .fx-crumbs,.fx-path { flex-basis:100%; }
+  .fx-table-wrap { max-height:60vh; }
+}

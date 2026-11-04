@@ -8,6 +8,8 @@ namespace LibraryRmm.Agent;
 public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, OutputSpool spool,
     PowerShellRunner runner, InventoryCollector inventory, ILogger<AgentWorker> logger) : BackgroundService
 {
+    internal const int ClaimWaitSeconds = 20;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Startup self-update happens BEFORE recovery, heartbeats or job claims, so it can never
@@ -33,18 +35,25 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
         {
             while (!stoppingToken.IsCancellationRequested)
             {
+                var pause = false;
                 try
                 {
-                    var job = await api.ClaimAsync(stoppingToken);
+                    // Long-poll: the server answers as soon as a job is queued (or after ~20 s), so an
+                    // operator's action starts within moments. 20 s stays well below the 30 s client timeout.
+                    var started = DateTimeOffset.UtcNow;
+                    var job = await api.ClaimAsync(stoppingToken, ClaimWaitSeconds);
                     if (job is not null) await ProcessJobAsync(job, stoppingToken);
+                    // A server without long-poll support answers an empty claim at once; never spin on it.
+                    else pause = DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(1);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception exception)
                 {
                     // Exception messages can include local paths but never payloads or auth headers.
                     logger.LogWarning("Job polling failed ({FailureType}); retrying polling, never execution.", exception.GetType().Name);
+                    pause = true;
                 }
-                await Task.Delay(TimeSpan.FromSeconds(configuration.PollSeconds), stoppingToken);
+                if (pause) await Task.Delay(TimeSpan.FromSeconds(configuration.PollSeconds), stoppingToken);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
@@ -130,6 +139,18 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     deadline.CancelAfter(TimeSpan.FromSeconds(Math.Min(timeout, 120)));
                     await StorageExplorer.InspectAsync(path, journal.AppendAsync, deadline.Token);
                     await journal.CompleteAsync(new JobCompletion("succeeded", 0, "Read-only storage report completed; inspect partial/errors fields."));
+                    break;
+                }
+                case "files":
+                {
+                    // Explorer operations: list/delete/move/copy/rename/mkdir/download. One job = one
+                    // operation; per-item results are reported and nothing is ever retried.
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(timeout));
+                    var outcome = await FileOperations.ExecuteAsync(job.Payload, FileSafetyPolicy.ForAgent(configuration.DataDirectory),
+                        new AgentFileTransfer(api, job.Id), deadline.Token);
+                    await journal.AppendAsync("stdout", outcome.Json);
+                    await journal.CompleteAsync(new JobCompletion(outcome.Status, outcome.ExitCode, outcome.Summary));
                     break;
                 }
                 case "reboot":

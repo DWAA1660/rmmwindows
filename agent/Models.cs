@@ -77,20 +77,58 @@ public sealed class AgentApi : IDisposable
     public async Task<T?> SendAsync<T>(HttpMethod method, string path, object body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(body, options: AgentConfiguration.Json) };
+        using var response = await SendAuthorizedAsync(request, cancellationToken);
+        return await response.Content.ReadFromJsonAsync<T>(AgentConfiguration.Json, cancellationToken);
+    }
+    private async Task<HttpResponseMessage> SendAuthorizedAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
         // Read per request: the credential is filled in after a join request is approved.
         if (configuration.AwaitingApproval) throw new InvalidOperationException("Agent is awaiting approval and has no credential yet.");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", configuration.AgentToken);
-        using var response = await client.SendAsync(request, cancellationToken);
+        var response = await client.SendAsync(request, cancellationToken);
         // Never put response bodies, credentials, or script bodies in logs/exceptions.
-        if (!response.IsSuccessStatusCode) throw new AgentApiException((int)response.StatusCode);
-        return await response.Content.ReadFromJsonAsync<T>(AgentConfiguration.Json, cancellationToken);
+        if (!response.IsSuccessStatusCode) { var status = (int)response.StatusCode; response.Dispose(); throw new AgentApiException(status); }
+        return response;
     }
     public Task CheckInAsync(object body, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, "checkin", body, ct);
-    public async Task<AgentJob?> ClaimAsync(CancellationToken ct) => (await SendAsync<ClaimResponse>(HttpMethod.Post, "jobs/claim", new { }, ct))?.Job;
+    /// <summary>With <paramref name="waitSeconds"/> &gt; 0 the server holds the request (long-poll) until a job is queued
+    /// or the wait elapses. It must stay well below the 30 s client timeout. 0 asks for an immediate answer.</summary>
+    public async Task<AgentJob?> ClaimAsync(CancellationToken ct, int waitSeconds = 0) =>
+        (await SendAsync<ClaimResponse>(HttpMethod.Post, "jobs/claim", waitSeconds > 0 ? new { waitSeconds } : new { }, ct))?.Job;
+    /// <summary>One raw chunk (at most 4 MiB) of the file requested by a <c>files</c> download job.</summary>
+    public async Task UploadFileChunkAsync(string id, long sequence, ReadOnlyMemory<byte> data, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"jobs/{Guid.Parse(id):D}/file/{sequence}") { Content = new ReadOnlyMemoryContent(data) };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        using var response = await SendAuthorizedAsync(request, ct);
+    }
+    public Task FinishFileAsync(string id, object body, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, $"jobs/{Guid.Parse(id):D}/file/complete", body, ct);
     public Task<StartResponse?> StartAsync(AgentJob job, CancellationToken ct) => SendAsync<StartResponse>(HttpMethod.Post, $"jobs/{Guid.Parse(job.Id):D}/start", new { job.DispatchToken }, ct);
     public Task UploadAsync(string id, OutputChunk chunk, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Put, $"jobs/{Guid.Parse(id):D}/output/{chunk.Sequence}", new { chunk.Stream, chunk.Text }, ct);
     public Task CompleteAsync(string id, JobCompletion completion, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, $"jobs/{Guid.Parse(id):D}/complete", completion, ct);
     public void Dispose() => client.Dispose();
+}
+
+/// <summary>Sends a download job's bytes. Each upload is retried (delivery, never execution): the server
+/// accepts an identical duplicate chunk and rejects different bytes for the same sequence.</summary>
+public sealed class AgentFileTransfer(AgentApi api, string jobId) : IFileTransfer
+{
+    public Task UploadChunkAsync(long sequence, ReadOnlyMemory<byte> data, CancellationToken ct) =>
+        RetryAsync(() => api.UploadFileChunkAsync(jobId, sequence, data, ct), ct);
+    public Task FinishAsync(string name, long sizeBytes, string sha256, long chunks, CancellationToken ct) =>
+        RetryAsync(() => api.FinishFileAsync(jobId, new { name, sizeBytes, sha256, chunks }, ct), ct);
+    private static async Task RetryAsync(Func<Task> send, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { await send(); return; }
+            catch (Exception exception) when (attempt < 5 && !ct.IsCancellationRequested &&
+                (exception is HttpRequestException or TaskCanceledException || exception is AgentApiException { StatusCode: >= 500 or 429 }))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct);
+            }
+        }
+    }
 }
 
 public sealed class AgentApiException(int statusCode) : Exception($"Agent API request failed with HTTP {statusCode}.")

@@ -55,7 +55,7 @@ test('v1 migration preserves the existing account and is repeatable',()=>{
   const folder=mkdtempSync(join(tmpdir(),'rmm-account-migration-'));const filename=join(folder,'test.db');
   try {
     const old=new DatabaseSync(filename);old.exec("CREATE TABLE users (id TEXT PRIMARY KEY,username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL); INSERT INTO users VALUES ('old','admin','original-hash','2026-01-01'); PRAGMA user_version=1;");old.close();
-    for(let i=0;i<2;i++){const db=openDatabase(filename);const user=db.prepare('SELECT * FROM users').get();assert.equal(user.role,'admin');assert.equal(user.disabled,0);assert.equal(user.password_hash,'original-hash');assert.equal(db.prepare('PRAGMA user_version').get().user_version,3);assert.equal(db.prepare("SELECT count(*) n FROM join_requests").get().n,0);db.close();}
+    for(let i=0;i<2;i++){const db=openDatabase(filename);const user=db.prepare('SELECT * FROM users').get();assert.equal(user.role,'admin');assert.equal(user.disabled,0);assert.equal(user.password_hash,'original-hash');assert.equal(db.prepare('PRAGMA user_version').get().user_version,4);assert.equal(db.prepare("SELECT count(*) n FROM join_requests").get().n,0);assert.equal(db.prepare("SELECT count(*) n FROM file_transfers").get().n,0);db.close();}
   }finally{assert.ok(folder.startsWith(join(tmpdir(),'rmm-account-migration-')));rmSync(folder,{recursive:true,force:true});}
 });
 

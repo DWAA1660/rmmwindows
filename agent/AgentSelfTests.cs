@@ -27,7 +27,11 @@ internal static class AgentSelfTests
             ("unsafe storage paths are rejected", StoragePathAsync),
             ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
             ("updater stages only verified packages and never loops", UpdaterStagingAsync),
-            ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync)
+            ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync),
+            ("file explorer lists, copies, moves, renames and creates folders (temp only)", FileOperationsBasicAsync),
+            ("file explorer recursive delete removes links without following them", FileOperationsLinkDeleteAsync),
+            ("file explorer refuses protected, unsafe and secret paths", FileOperationsSafetyAsync),
+            ("file explorer download sends exact bytes in chunks with SHA-256", FileOperationsDownloadAsync)
         };
         var failed = 0;
         foreach (var test in tests)
@@ -409,6 +413,223 @@ internal static class AgentSelfTests
                 "Approved credential was not persisted with the existing identity.");
         }
         finally { Directory.Delete(directory, true); }
+    }
+
+    // ---------- file explorer (temp directories only; never touches real system files) ----------
+
+    private static FileSafetyPolicy TempPolicy(string root) => new(
+        protectedTrees: [Path.Combine(root, "agent-install"), Path.Combine(root, "agent-data")],
+        protectedRoots: [Path.Combine(root, "protected-root")],
+        secretTrees: [Path.Combine(root, "agent-data")]);
+
+    private static async Task<JsonElement> RunFiles(object payload, FileSafetyPolicy policy, IFileTransfer? transfer = null)
+    {
+        var outcome = await FileOperations.ExecuteAsync(JsonSerializer.SerializeToElement(payload, AgentConfiguration.Json), policy, transfer, CancellationToken.None);
+        var json = JsonDocument.Parse(outcome.Json).RootElement.Clone();
+        Assert(json.GetProperty("ok").GetBoolean() == (outcome.Status == "succeeded"), "Outcome status and JSON disagree.");
+        return json;
+    }
+
+    private static async Task FileOperationsBasicAsync()
+    {
+        var root = CreateTemp();
+        try
+        {
+            var policy = TempPolicy(root);
+            var work = Path.Combine(root, "work");
+            Directory.CreateDirectory(Path.Combine(work, "folder", "nested"));
+            File.WriteAllText(Path.Combine(work, "folder", "nested", "deep.txt"), "deep");
+            File.WriteAllText(Path.Combine(work, "a.txt"), "alpha");
+            File.WriteAllText(Path.Combine(work, "h.txt"), "hidden");
+            File.SetAttributes(Path.Combine(work, "h.txt"), FileAttributes.Hidden);
+
+            var listed = await RunFiles(new { action = "list", path = work }, policy);
+            var entries = listed.GetProperty("entries").EnumerateArray().ToDictionary(entry => entry.GetProperty("name").GetString()!);
+            Assert(entries.Count == 3 && entries["a.txt"].GetProperty("size").GetInt64() == 5 && entries["h.txt"].GetProperty("hidden").GetBoolean()
+                && !entries["a.txt"].GetProperty("hidden").GetBoolean() && entries["folder"].GetProperty("type").GetString() == "directory"
+                && listed.GetProperty("parent").GetString() == root, "Listing is missing entries, sizes, attributes or parent.");
+            var drives = await RunFiles(new { action = "list", path = "" }, policy);
+            Assert(drives.GetProperty("drives").GetArrayLength() > 0, "Drive list is empty.");
+            Assert(!(await RunFiles(new { action = "list", path = Path.Combine(work, "missing") }, policy)).GetProperty("ok").GetBoolean(), "Missing folder listed.");
+
+            Assert((await RunFiles(new { action = "mkdir", path = Path.Combine(work, "made") }, policy)).GetProperty("ok").GetBoolean() && Directory.Exists(Path.Combine(work, "made")), "mkdir failed.");
+            Assert(!(await RunFiles(new { action = "mkdir", path = Path.Combine(work, "made") }, policy)).GetProperty("ok").GetBoolean(), "mkdir replaced an existing folder.");
+            Assert(!(await RunFiles(new { action = "mkdir", path = Path.Combine(work, "no-parent", "child") }, policy)).GetProperty("ok").GetBoolean(), "mkdir created missing parents.");
+
+            var copied = await RunFiles(new { action = "copy", sources = new[] { Path.Combine(work, "a.txt"), Path.Combine(work, "folder") }, destinationDirectory = Path.Combine(work, "made") }, policy);
+            Assert(copied.GetProperty("succeeded").GetInt32() == 2 && File.ReadAllText(Path.Combine(work, "made", "folder", "nested", "deep.txt")) == "deep"
+                && File.Exists(Path.Combine(work, "a.txt")), "Copy did not duplicate files and folders.");
+            var conflict = await RunFiles(new { action = "copy", sources = new[] { Path.Combine(work, "a.txt") }, destinationDirectory = Path.Combine(work, "made") }, policy);
+            Assert(conflict.GetProperty("failed").GetInt32() == 1, "Copy overwrote an existing file without overwrite.");
+            File.WriteAllText(Path.Combine(work, "a.txt"), "changed");
+            Assert((await RunFiles(new { action = "copy", sources = new[] { Path.Combine(work, "a.txt") }, destinationDirectory = Path.Combine(work, "made"), overwrite = true }, policy)).GetProperty("ok").GetBoolean()
+                && File.ReadAllText(Path.Combine(work, "made", "a.txt")) == "changed", "Copy with overwrite failed.");
+            var same = await RunFiles(new { action = "copy", sources = new[] { Path.Combine(work, "a.txt") }, destinationDirectory = work }, policy);
+            Assert(same.GetProperty("ok").GetBoolean() && File.Exists(Path.Combine(work, "a - Copy.txt")), "Paste into the same folder did not create a copy.");
+            Assert((await RunFiles(new { action = "copy", sources = new[] { Path.Combine(work, "folder") }, destinationDirectory = Path.Combine(work, "folder", "nested") }, policy)).GetProperty("failed").GetInt32() == 1,
+                "A folder was copied into itself.");
+
+            var moved = await RunFiles(new { action = "move", sources = new[] { Path.Combine(work, "a - Copy.txt"), Path.Combine(work, "missing.txt") }, destinationDirectory = Path.Combine(work, "folder") }, policy);
+            Assert(moved.GetProperty("succeeded").GetInt32() == 1 && moved.GetProperty("failed").GetInt32() == 1 && File.Exists(Path.Combine(work, "folder", "a - Copy.txt"))
+                && !File.Exists(Path.Combine(work, "a - Copy.txt")), "Move did not report per-item results or keep going after an error.");
+            Assert((await RunFiles(new { action = "move", sources = new[] { Path.Combine(work, "folder") }, destinationDirectory = Path.Combine(work, "folder", "nested") }, policy)).GetProperty("failed").GetInt32() == 1,
+                "A folder was moved into itself.");
+
+            Assert((await RunFiles(new { action = "rename", path = Path.Combine(work, "made"), newName = "Renamed" }, policy)).GetProperty("ok").GetBoolean() && Directory.Exists(Path.Combine(work, "Renamed")), "Rename failed.");
+            Assert((await RunFiles(new { action = "rename", path = Path.Combine(work, "Renamed"), newName = "renamed" }, policy)).GetProperty("ok").GetBoolean()
+                && new DirectoryInfo(work).GetDirectories().Any(directory => directory.Name == "renamed"), "Case-only rename failed.");
+            foreach (var bad in new[] { "..", "a/b", "x:y", "CON", "trailing.", "" })
+                Assert(!(await RunFiles(new { action = "rename", path = Path.Combine(work, "renamed"), newName = bad }, policy)).GetProperty("ok").GetBoolean(), $"Unsafe new name accepted: '{bad}'.");
+
+            var deletion = await RunFiles(new { action = "delete", paths = new[] { Path.Combine(work, "renamed") }, recursive = false }, policy);
+            Assert(!deletion.GetProperty("ok").GetBoolean() && Directory.Exists(Path.Combine(work, "renamed")), "Non-recursive delete removed a non-empty folder.");
+            File.SetAttributes(Path.Combine(work, "renamed", "a.txt"), FileAttributes.ReadOnly);
+            Assert((await RunFiles(new { action = "delete", paths = new[] { Path.Combine(work, "renamed"), Path.Combine(work, "a.txt") }, recursive = true }, policy)).GetProperty("succeeded").GetInt32() == 2
+                && !Directory.Exists(Path.Combine(work, "renamed")) && !File.Exists(Path.Combine(work, "a.txt")), "Recursive delete (including a read-only file) failed.");
+        }
+        finally { ForceDelete(root); }
+    }
+
+    private static async Task FileOperationsLinkDeleteAsync()
+    {
+        var root = CreateTemp();
+        try
+        {
+            var policy = TempPolicy(root);
+            var target = Path.Combine(root, "link-target");
+            Directory.CreateDirectory(target);
+            File.WriteAllText(Path.Combine(target, "keep.txt"), "must survive");
+            var tree = Path.Combine(root, "tree");
+            Directory.CreateDirectory(tree);
+            File.WriteAllText(Path.Combine(tree, "remove.txt"), "x");
+            var link = Path.Combine(tree, "link");
+            if (!TryCreateDirectoryLink(link, target))
+            {
+                Console.WriteLine("SKIP link sub-check: creating a junction or symbolic link is not permitted here.");
+                return;
+            }
+            // Copy skips the link instead of following it.
+            var copyTarget = Path.Combine(root, "copy");
+            Directory.CreateDirectory(copyTarget);
+            var copy = await RunFiles(new { action = "copy", sources = new[] { tree }, destinationDirectory = copyTarget }, policy);
+            Assert(copy.GetProperty("ok").GetBoolean() && File.Exists(Path.Combine(copyTarget, "tree", "remove.txt")) && !Directory.Exists(Path.Combine(copyTarget, "tree", "link")),
+                "Recursive copy followed or copied a link.");
+            var listed = await RunFiles(new { action = "list", path = tree }, policy);
+            Assert(listed.GetProperty("entries").EnumerateArray().Any(entry => entry.GetProperty("name").GetString() == "link" && entry.GetProperty("reparse").GetBoolean()), "Link not flagged as reparse point.");
+            var deleted = await RunFiles(new { action = "delete", paths = new[] { tree }, recursive = true }, policy);
+            Assert(deleted.GetProperty("ok").GetBoolean() && !Directory.Exists(tree), "Recursive delete failed.");
+            Assert(File.ReadAllText(Path.Combine(target, "keep.txt")) == "must survive", "Recursive delete followed a link and removed its target's contents.");
+        }
+        finally { ForceDelete(root); }
+    }
+
+    private static bool TryCreateDirectoryLink(string link, string target)
+    {
+        try
+        {
+            // Junctions need no elevation; fall back to a symbolic link (needs Developer Mode or admin).
+            using var process = Process.Start(new ProcessStartInfo("cmd.exe", ["/d", "/c", "mklink", "/J", link, target])
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true });
+            process!.WaitForExit(10000);
+            if (Directory.Exists(link) && (new DirectoryInfo(link).Attributes & FileAttributes.ReparsePoint) != 0) return true;
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+        try { Directory.CreateSymbolicLink(link, target); return true; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    private static async Task FileOperationsSafetyAsync()
+    {
+        // The real agent policy: pure path checks, no file system access.
+        var real = FileSafetyPolicy.ForAgent(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "LibraryRmm"));
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        foreach (var path in new[] { "C:\\", "D:\\", windows, Path.Combine(windows, "System32", "library-rmm-never-exists.dll"), programFiles, programData,
+                     Path.Combine(programFiles, "LibraryRmm"), Path.Combine(programFiles, "LibraryRmm", "LibraryRmm.Agent.exe"), Path.Combine(programData, "LibraryRmm", "agent.json"),
+                     Path.Combine(Path.GetPathRoot(windows)!, "Users"), AppContext.BaseDirectory })
+        {
+            var refused = false;
+            try { real.EnsureMutable(FileOperations.ValidatePath(path)); } catch (UnauthorizedAccessException) { refused = true; }
+            Assert(refused, $"Protected path was not refused: {path}");
+        }
+        var destinationRefused = false;
+        try { real.EnsureWritableDestination(Path.Combine(windows, "Temp")); } catch (UnauthorizedAccessException) { destinationRefused = true; }
+        Assert(destinationRefused, "Files could be placed inside the Windows folder.");
+        var secretRefused = false;
+        try { real.EnsureReadable(Path.Combine(programData, "LibraryRmm", "agent.json")); } catch (UnauthorizedAccessException) { secretRefused = true; }
+        Assert(secretRefused, "The agent credential file could be read remotely.");
+        real.EnsureMutable(Path.Combine(programFiles, "Some Old App")); // children of Program Files remain manageable
+        foreach (var path in new[] { "relative\\x", "\\\\server\\share\\x", "\\\\?\\C:\\x", "\\\\.\\PhysicalDrive0", "C:\\x\\file.txt:stream", "C:\\x\\*.txt", "C:\\x\\NUL", "C:\\x\\con.txt", "https://example.test/x" })
+        {
+            var rejected = false;
+            try { FileOperations.ValidatePath(path); } catch (ArgumentException) { rejected = true; }
+            Assert(rejected, $"Unsafe path accepted: {path}");
+        }
+
+        // End to end with a temp policy: refusals keep going per item and change nothing.
+        var root = CreateTemp();
+        try
+        {
+            var policy = TempPolicy(root);
+            var data = Path.Combine(root, "agent-data");
+            Directory.CreateDirectory(data);
+            File.WriteAllText(Path.Combine(data, "agent.json"), "{\"agentToken\":\"secret\"}");
+            Directory.CreateDirectory(Path.Combine(root, "protected-root", "child"));
+            File.WriteAllText(Path.Combine(root, "free.txt"), "ok");
+            var result = await RunFiles(new { action = "delete", paths = new[] { data, Path.Combine(data, "agent.json"), Path.Combine(root, "protected-root"), root, Path.Combine(root, "free.txt") }, recursive = true }, policy);
+            Assert(result.GetProperty("succeeded").GetInt32() == 1 && result.GetProperty("failed").GetInt32() == 4 && File.Exists(Path.Combine(data, "agent.json"))
+                && Directory.Exists(Path.Combine(root, "protected-root")) && !File.Exists(Path.Combine(root, "free.txt")), "Protected deletes were not refused per item.");
+            Assert((await RunFiles(new { action = "delete", paths = new[] { Path.Combine(root, "protected-root", "child") }, recursive = true }, policy)).GetProperty("ok").GetBoolean(),
+                "Children of a protected root could not be managed.");
+            Assert(!(await RunFiles(new { action = "download", path = Path.Combine(data, "agent.json") }, policy, new MemoryTransfer())).GetProperty("ok").GetBoolean(), "Agent credential was downloadable.");
+            Assert((await RunFiles(new { action = "copy", sources = new[] { Path.Combine(data, "agent.json") }, destinationDirectory = root }, policy)).GetProperty("failed").GetInt32() == 1
+                && !File.Exists(Path.Combine(root, "agent.json")), "Agent credential could be copied out.");
+            Assert(!(await RunFiles(new { action = "mkdir", path = Path.Combine(data, "x") }, policy)).GetProperty("ok").GetBoolean(), "Folder created inside the agent data tree.");
+            Assert(!(await RunFiles(new { action = "copy", sources = new[] { Path.Combine(root, "protected-root") }, destinationDirectory = data }, policy)).GetProperty("ok").GetBoolean(), "Copy into the agent data tree.");
+            Assert(!(await RunFiles(new { action = "teleport", path = root }, policy)).GetProperty("ok").GetBoolean(), "Unknown action accepted.");
+        }
+        finally { ForceDelete(root); }
+    }
+
+    private sealed class MemoryTransfer : IFileTransfer
+    {
+        public List<(long Sequence, byte[] Data)> Chunks { get; } = [];
+        public (string Name, long Size, string Sha256, long Chunks)? Finished { get; private set; }
+        public Task UploadChunkAsync(long sequence, ReadOnlyMemory<byte> data, CancellationToken ct) { Chunks.Add((sequence, data.ToArray())); return Task.CompletedTask; }
+        public Task FinishAsync(string name, long sizeBytes, string sha256, long chunks, CancellationToken ct) { Finished = (name, sizeBytes, sha256, chunks); return Task.CompletedTask; }
+    }
+
+    private static async Task FileOperationsDownloadAsync()
+    {
+        var root = CreateTemp();
+        try
+        {
+            var bytes = new byte[FileOperations.TransferChunkBytes * 2 + 12345];
+            new Random(7).NextBytes(bytes);
+            var file = Path.Combine(root, "report αβ.bin");
+            File.WriteAllBytes(file, bytes);
+            var transfer = new MemoryTransfer();
+            var result = await RunFiles(new { action = "download", path = file }, TempPolicy(root), transfer);
+            var received = transfer.Chunks.OrderBy(chunk => chunk.Sequence).SelectMany(chunk => chunk.Data).ToArray();
+            var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+            Assert(result.GetProperty("ok").GetBoolean() && transfer.Chunks.Count == 3 && transfer.Chunks.Select(chunk => chunk.Sequence).SequenceEqual([0L, 1L, 2L]), "Download was not chunked in sequence.");
+            Assert(received.SequenceEqual(bytes) && transfer.Finished == ("report αβ.bin", bytes.Length, sha, 3L), "Downloaded bytes or SHA-256 differ.");
+            var empty = Path.Combine(root, "empty.txt");
+            File.WriteAllBytes(empty, []);
+            var emptyTransfer = new MemoryTransfer();
+            Assert((await RunFiles(new { action = "download", path = empty }, TempPolicy(root), emptyTransfer)).GetProperty("ok").GetBoolean()
+                && emptyTransfer.Chunks.Count == 0 && emptyTransfer.Finished?.Size == 0, "Empty file download failed.");
+            Assert(!(await RunFiles(new { action = "download", path = root }, TempPolicy(root), new MemoryTransfer())).GetProperty("ok").GetBoolean(), "A folder was downloaded.");
+        }
+        finally { ForceDelete(root); }
+    }
+
+    private static void ForceDelete(string root)
+    {
+        foreach (var file in Directory.EnumerateFiles(root, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }))
+            try { File.SetAttributes(file, FileAttributes.Normal); } catch (IOException) { }
+        Directory.Delete(root, true);
     }
 
     private sealed class JoinHandler(Queue<object> responses) : HttpMessageHandler

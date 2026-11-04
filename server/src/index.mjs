@@ -12,6 +12,8 @@ let stopping = false;
 function shutdown() {
   if (stopping) return; stopping = true;
   clearInterval(scheduler);
+  // Long-poll job claims are held for up to 25 s; answer them now so the listener can close.
+  service.releaseClaimWaiters();
   listener.close(() => { service.close(); process.exit(0); });
   setTimeout(() => process.exit(1), 10000).unref();
 }
