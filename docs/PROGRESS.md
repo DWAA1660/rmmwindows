@@ -20,7 +20,11 @@
 - Final package uses .NET 10 LTS (SDK 10.0.403 installed only under ignored artifacts/dotnet-sdk; WindowsServices 10.0.14). Packaged self-contained executable passes all eight checks. Installer paths/ownership markers are validated before any ACL changes, with a dedicated harmless validation test.
 - Initial production deployment succeeded: https://rmm.parkcountylibrary.org returns HTTPS 200 and /api/health is healthy; unauthenticated inventory returns 401. Container library-rmm-rmm-1 is healthy on loopback 8088. Dedicated updater systemd service active. Let’s Encrypt certificate issued with automatic renewal; expiration 2027-02-02.
 - All ten pre-existing host containers remain running with original uptimes; no existing application container was restarted.
-- Production login/update-button verification and GitHub CI/release publication are in progress.
+- Production browser login verified. Settings helper reachable through bearer-authenticated private bridge route. Clicking “Pull latest & restart app” pulled commit 6edeb2e9b94a8eb770d11abfeace6893d27cf86e, rebuilt and restarted only RMM, and returned “Succeeded / Application updated and healthy.” Session persisted and public health reports the new commit. Screenshots saved locally under ignored artifacts/live-dashboard.png and artifacts/live-update-verified.png.
+- Automatic source checks enabled every 300 seconds. Runtime dependency audits for server and web report zero known vulnerabilities.
+- GitHub Actions initial and final full runs succeeded across Linux server/web/updater tests, Windows agent/installer/real integration, and Docker/GHCR publication. Final source run: https://github.com/DWAA1660/rmmwindows/actions/runs/41918988615.
+- Private preview release published: https://github.com/DWAA1660/rmmwindows/releases/tag/v0.1.0, with self-contained .NET 10 win-x64 installer zip and SHA256 file. Current archive SHA256: 5af229d0288addd4a8380fd475647e53c2dcc504b8da4939a4d6211ac17721bb.
+- Initial login saved root-only on the host and downloaded into local ignored artifacts/admin-access.txt with ACL restricted to current user and SYSTEM. No credentials are committed.
 - Automatic approval review rejected cleanup of an abandoned isolated test folder under the developer temp directory (`library-rmm-e2e-gzLBS0`) with only `rejected: blocked by policy`, including a safer explicit-file cleanup attempt. It was left intact; contains disposable test DB/config only, not production credentials. No further deletion attempted.
 
 ## Current limitations / next milestones
