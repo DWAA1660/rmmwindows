@@ -16,3 +16,6 @@ artifacts/*
 *.tsbuildinfo
 __pycache__/
 .DS_Store
+
+# Local Claude Code worktrees and settings (never publish)
+.claude/
