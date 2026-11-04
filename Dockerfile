@@ -1,3 +1,18 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS agent-build
+WORKDIR /build/agent
+COPY agent/LibraryRmm.Agent.csproj ./
+RUN dotnet restore --runtime win-x64
+COPY agent/ ./
+RUN dotnet publish --configuration Release --runtime win-x64 --self-contained true --no-restore -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output /publish
+
+FROM node:24-bookworm-slim AS agent-package
+RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
+COPY --from=agent-build /publish /package/agent
+COPY installer/Install-Agent.ps1 installer/Uninstall-Agent.ps1 installer/README.md /package/
+COPY installer/package-agent.mjs /build/package-agent.mjs
+COPY agent/LibraryRmm.Agent.csproj /build/agent.csproj
+RUN node /build/package-agent.mjs /package /output /build/agent.csproj
+
 FROM node:24-bookworm-slim AS web-build
 WORKDIR /build/web
 COPY web/package*.json ./
@@ -12,8 +27,10 @@ WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY server/ ./
+COPY installer/Bootstrap-Agent.ps1 /app/installer/Bootstrap-Agent.ps1
 RUN npm test
 COPY --from=web-build /build/web/dist /app/web/dist
+COPY --from=agent-package /output /app/downloads
 RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 3000

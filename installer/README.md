@@ -1,5 +1,27 @@
 # Windows agent installer
 
+## Install directly from the RMM website
+
+Open **Add endpoints** in the console, create an enrollment token, and copy the install command. On the endpoint, open **Windows PowerShell as administrator** and run:
+
+```powershell
+$installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'
+Invoke-WebRequest -UseBasicParsing 'https://rmm.parkcountylibrary.org/install.ps1' -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+The bootstrap downloads the agent from this server, checks its SHA256 before extraction, then starts the installer and securely prompts for a token. Nothing needs to be downloaded from private GitHub on the endpoint. Re-running it upgrades an existing installation while preserving enrollment. Do not put tokens into download URLs or a shared script.
+
+Direct ZIP: `https://rmm.parkcountylibrary.org/downloads/library-rmm-agent-win-x64.zip`. The website currently hosts x64 only. The Docker build cross-publishes the current agent and bundles its installer package with the web app, so future source updates keep downloads synchronized. Setup files remain in a uniquely named local temporary folder for inspection.
+
+To check download/checksum/extraction without enrollment, services or administrator changes:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -DownloadOnly
+```
+
+## Install from an extracted release ZIP
+
 Extract the release zip into a local folder. In an **administrator Windows PowerShell** window:
 
 ```powershell

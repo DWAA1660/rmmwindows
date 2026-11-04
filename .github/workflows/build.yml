@@ -42,6 +42,9 @@ jobs:
       - name: Verify installer target validation
         shell: pwsh
         run: ./installer/Test-InstallerPaths.ps1
+      - name: Verify website installer bootstrap
+        shell: powershell
+        run: ./installer/Test-Bootstrap.ps1
       - name: Verify real agent/API integration
         run: node deploy/test-agent-integration.mjs
       - uses: actions/upload-artifact@v4

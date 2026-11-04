@@ -3571,3 +3571,17 @@ td:last-child {
     scroll-behavior: auto !important;
   }
 }
+
+.agent-installer { margin-bottom: 24px; }
+.agent-installer-body { padding: 0 23px 23px; }
+.agent-download-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 24px; }
+.agent-download-actions > span { font-size: 11px; }
+.download-unavailable { opacity: .5; cursor: not-allowed; }
+.agent-command-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.agent-command-heading > strong { font-size: 12px; }
+.agent-install-command { background: #122b32; color: #d5eee6; padding: 17px; border-radius: 8px; font-size: 12px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.agent-install-command code { font-size: inherit; }
+.agent-installer-body > p { font-size: 11px; margin-top: 12px; }
+.agent-package-integrity { font-size: 11px; color: #647e82; margin-top: 15px; }
+.agent-package-integrity summary { cursor: pointer; margin-bottom: 9px; }
+.agent-package-integrity > code { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }

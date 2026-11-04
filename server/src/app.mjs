@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
+import { mountAgentDownloads } from './downloads.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -94,6 +95,7 @@ export function createApp(options = {}) {
     next();
   });
   app.use(express.json({ limit: '2mb', strict: true }));
+  mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
   const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
   const expectedOrigin = req => publicOrigin || `http://${req.headers.host}`;

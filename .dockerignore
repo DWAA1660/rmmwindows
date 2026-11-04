@@ -9,5 +9,3 @@ data
 .env.*
 **/*.db*
 **/*.log
-agent
-installer

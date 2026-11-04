@@ -18,4 +18,6 @@ GitHub Actions builds an image in GHCR. The initial host update service uses a s
 
 ## Scope boundaries
 
+Agent distribution is hosted by the app: `/install.ps1`, a public x64 ZIP, and public checksum/metadata. The Docker build cross-publishes the self-contained Windows service and packages the existing administrator installer. Public artifacts contain no enrollment token. An authenticated operator creates a token separately and the installer prompts securely. The bootstrap verifies HTTPS metadata/package SHA256 before extraction; it supports download-only validation without installing a service.
+
 Action1 deployment integration later. Initial installer is an administrator-run PowerShell installer for self-contained agent binaries, with packaging workflow. No unattended remote input control or covert screen capture. RBAC/MFA/SSO, mature alerts and remote assistance are follow-up work.

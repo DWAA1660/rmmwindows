@@ -1788,8 +1788,8 @@ function App() {
                   <Download size={24} />
                   <h2>Install the agent</h2>
                   <p>
-                    Use the packaged installer as an administrator, providing
-                    this server URL and your token.
+                    Run the PowerShell install command below as administrator,
+                    then enter your token when prompted.
                   </p>
                 </section>
                 <section className="panel step-card">
@@ -1802,6 +1802,7 @@ function App() {
                   </p>
                 </section>
               </div>
+              <AgentInstaller />
               <section className="panel">
                 <div className="panel-heading">
                   <div>
@@ -1863,7 +1864,8 @@ function App() {
               <div className="info-note">
                 <Download size={18} />
                 <p>
-                  The installer is delivered with the agent release package.
+                  Downloads come directly from this server. Enrollment tokens
+                  are entered securely on the endpoint and never included in download URLs.
                   Action1 software deployment integration will be added later.
                   Server URL: <code>{window.location.origin}</code>
                 </p>
@@ -3351,6 +3353,35 @@ function JobOutput({
       </div>
     </Modal>
   );
+}
+
+function AgentInstaller() {
+  const [manifest, setManifest] = useState<{version: string; runtime: string; sizeBytes: number; sha256: string} | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let active = true;
+    api<{version: string; runtime: string; sizeBytes: number; sha256: string}>("/agent-download")
+      .then(value => { if (active) setManifest(value); })
+      .catch(reason => { if (active) setError(reason.message); });
+    return () => { active = false; };
+  }, []);
+  const command = `$installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'\nInvoke-WebRequest -UseBasicParsing '${window.location.origin}/install.ps1' -OutFile $installer\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer`;
+  return <section className="panel agent-installer">
+    <div className="panel-heading"><div><h2>Install from this website</h2><p>Open Windows PowerShell as administrator on the computer you want to manage.</p></div><Download size={20}/></div>
+    <div className="agent-installer-body">
+      <div className="agent-download-actions">
+        <a className={`button primary ${!manifest ? "download-unavailable" : ""}`} href="/install.ps1" download aria-disabled={!manifest} onClick={event => { if (!manifest) event.preventDefault(); }}><Download size={16}/>Download install script</a>
+        <a className={`button secondary ${!manifest ? "download-unavailable" : ""}`} href="/downloads/library-rmm-agent-win-x64.zip" download aria-disabled={!manifest} onClick={event => { if (!manifest) event.preventDefault(); }}><ArrowDownToLine size={16}/>Download agent ZIP</a>
+        <span className="muted">{manifest ? `v${manifest.version} · Windows x64 · ${bytes(manifest.sizeBytes)}` : error || "Checking installer availability…"}</span>
+      </div>
+      <div className="agent-command-heading"><strong>Or copy and run this command</strong><button className="button small secondary" disabled={!manifest} onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError("Clipboard unavailable. Select and copy the command below."); } }}>{copied ? <Check size={14}/> : <Copy size={14}/>} {copied ? "Copied" : "Copy command"}</button></div>
+      <pre className="agent-install-command"><code>{command}</code></pre>
+      <p className="muted">The script verifies the package checksum, then prompts for your enrollment token. Re-running it updates an existing agent while preserving its identity. No reboot is required.</p>
+      {manifest && <details className="agent-package-integrity"><summary>Package SHA256</summary><code>{manifest.sha256}</code><a className="text-button" href="/downloads/library-rmm-agent-win-x64.zip.sha256" download>Download checksum</a></details>}
+      {manifest && error && <p role="alert" className="danger-text">{error}</p>}
+    </div>
+  </section>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

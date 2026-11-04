@@ -2,6 +2,15 @@
 
 All paths begin `/api`. JSON, UTC ISO timestamps. Operator routes require an HttpOnly session; state-changing routes require same-origin validation and CSRF header as implemented by server. Agent routes require `Authorization: Bearer <agentToken>` and are isolated from operator sessions.
 
+## Public installer distribution
+
+- `GET /api/agent-download` (no authentication): `{version,runtime,sha256,sizeBytes,downloadUrl,installScriptUrl}`. Whitelisted metadata only; no enrollment credentials. Returns 503 in builds without a package.
+- `GET /install.ps1`: bootstrap script with configured HTTPS PUBLIC_ORIGIN, never inferred from request Host headers. No enrollment token embedded. Runs checksum verification before extraction/installation, prompts securely through existing installer. `-DownloadOnly` verifies/extracts without installation or enrollment.
+- `GET /downloads/library-rmm-agent-win-x64.zip`: self-contained Windows x64 package as an attachment.
+- `GET /downloads/library-rmm-agent-win-x64.zip.sha256`: checksum text. The package is rebuilt with the source inside the Docker build; metadata integrity is checked on server startup. These paths are outside `/api`, except metadata.
+
+Public downloads do not authorize enrollment or management. Authenticated operators still create separate expiring/use-limited tokens; agents still use their own returned bearer credential.
+
 ## Agent protocol (owned by server + agent)
 
 - `POST /agent/enroll`: `{ enrollmentToken, deviceId, hostname }` -> `{endpointId,agentToken}`. Persist token in protected ProgramData; never log.

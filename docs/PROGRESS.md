@@ -30,6 +30,17 @@
 
 ## Current limitations / next milestones
 
+## 2026-11-04 — Website agent installation
+
+- Added public `/install.ps1`, `/downloads/library-rmm-agent-win-x64.zip`, checksum file, and `/api/agent-download` metadata. Management/enrollment-token creation remains authenticated. Public scripts/artifacts contain no enrollment secret; bootstrap prompts through the existing SecureString installer.
+- Add endpoints now has direct install-script/ZIP buttons, package version/size/checksum, and a copyable administrator PowerShell command.
+- Docker build cross-publishes the .NET 10 Windows x64 service and packages the installer with each app image; avoids private GitHub login on endpoints and keeps web downloads synchronized with source.
+- Bootstrap validates HTTPS origin and expected download path, checks SHA256 before extraction, supports `-DownloadOnly`, and never reboots. Existing endpoint enrollment remains preserved by the underlying installer.
+- Local verification: ten server tests pass (including unauthenticated downloads, management still401, Host header injection resistance, checksum validation/tamper refusal); web TypeScript/production build passes; real Windows PowerShell 5.1 mocked bootstrap checks pass for good download, no execution in DownloadOnly, bad hash refusal before extraction, and foreign URL refusal.
+- Linux Docker cross-publish, live download-only check, browser UI verification and deployment are pending.
+
+## Current limitations / next milestones
+
 - One administrator role, no MFA/SSO or account/password-management UI yet.
 - Metrics are inventory snapshots (15-minute full inventory by default), not a historical time-series telemetry system.
 - No actual screen viewing until a consented visible desktop companion is built; no remote input control.
