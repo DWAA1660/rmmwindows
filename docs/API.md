@@ -26,6 +26,12 @@ PowerShell payload `{script}`. Reboot payload `{delaySeconds:30,reason}` with de
 
 ## Operator protocol (owned by server + web)
 
+Accounts: `auth/me` and login return `{id,username,email,role,disabled}` in `user`. Username login is case-insensitive; email is contact-only with no delivery/reset-email service. Roles: `admin` full access including users/audit/app updates; `operator` endpoint/script/schedule actions; `viewer` read-only fleet/output. Own-account routes are available to all enabled roles.
+
+- `PATCH /account {email,currentPassword}` changes own email.
+- `POST /account/password {currentPassword,newPassword}` requires 14–1024 characters and revokes all sessions, including the caller.
+- Admin-only `GET /users`, `POST /users {username,email,role,password,currentPassword}`, `PATCH /users/:id {email?,role?,disabled?,password?,currentPassword}`. `currentPassword` is the acting admin's password. Roles/disabling/reset revoke affected sessions immediately. Last enabled admin cannot be disabled/demoted. Accounts are disabled rather than deleted to retain history. No password hashes are returned or audited.
+
 - `GET /health`, `GET /auth/me`, `POST /auth/login {username,password}`, `POST /auth/logout`.
 - `GET /overview` -> totals/stats; `GET /endpoints` -> array; `GET /endpoints/:id` -> endpoint incl inventory; `PATCH /endpoints/:id {displayName,tags}`; `POST /endpoints/:id/revoke`.
 - `POST /enrollment-tokens {label,maxUses,expiresInHours}` -> token shown once. `GET /enrollment-tokens` lists metadata.

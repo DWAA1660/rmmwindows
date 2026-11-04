@@ -3573,6 +3573,18 @@ td:last-child {
 }
 
 .agent-installer { margin-bottom: 24px; }
+.account-settings { margin-bottom:24px; }
+.account-forms { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:28px;padding:0 23px 23px; }
+.account-forms form,.account-editor { display:flex;flex-direction:column;gap:14px; }
+.account-forms form h3,.account-editor h3 { font-size:15px; }
+.account-forms .button { align-self:flex-start; }
+.account-forms p,.account-editor p { font-size:11px; }
+.account-feedback { padding:0 23px 18px;font-size:12px; }
+.account-editor { margin:0 23px 23px;padding:22px;background:#f5f9f8;border:1px solid #dce8e3;border-radius:8px; }
+.account-editor-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px; }
+.account-toggle { flex-direction:row;align-items:center; }
+.account-buttons { display:flex;gap:10px; }
+@media(max-width:900px) { .account-forms,.account-editor-fields {grid-template-columns:1fr;} }
 .agent-installer-body { padding: 0 23px 23px; }
 .agent-download-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 24px; }
 .agent-download-actions > span { font-size: 11px; }

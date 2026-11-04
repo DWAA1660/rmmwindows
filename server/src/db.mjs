@@ -21,8 +21,15 @@ export function openDatabase(filename) {
     CREATE TABLE IF NOT EXISTS job_requests (idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, job_ids TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, details TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS audit_created ON audit(created_at);
-    PRAGMA user_version=1;
   `);
+  // Additive v2 migration preserves existing accounts, sessions and consumed jobs.
+  const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map(column => column.name));
+  transaction(db, () => {
+    if (!userColumns.has('email')) db.exec("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''");
+    if (!userColumns.has('role')) db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+    if (!userColumns.has('disabled')) db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users(lower(username)); PRAGMA user_version=2;');
+  });
   return db;
 }
 

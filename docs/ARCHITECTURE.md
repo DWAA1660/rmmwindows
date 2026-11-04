@@ -14,6 +14,8 @@ Web authentication uses password scrypt and opaque HttpOnly sessions; agent cred
 
 ## Updates
 
+Account schema v2 adds email, role and disabled fields in an additive transaction; existing administrators and credentials are preserved. Roles are checked against current database state for each request. Password changes/reset, disabling and role changes delete affected sessions. All sensitive account mutations require acting-user password confirmation and CSRF/origin checks, with rate limiting. Preserve at least one enabled administrator. Email is contact-only; no SMTP/reset-email workflow is configured. Do not roll back to pre-account-management images after creating restricted users, as older code does not enforce these roles.
+
 GitHub Actions builds an image in GHCR. The initial host update service uses a separate read-only deploy key to fetch private GitHub `main` and build a commit-tagged local image, preserving data and restarting only this stack after health checks. This avoids storing broad GitHub PAT/GHCR credentials on the shared host. Admin UI requests updates via a narrowly scoped authenticated update helper; Docker socket is never exposed to the web container. The helper and Compose config are reviewed host files outside the auto-updated checkout. Pending/running jobs are never requeued during upgrades. A failed revision is not automatically retried until a new commit arrives; manual retry is explicit.
 
 ## Scope boundaries

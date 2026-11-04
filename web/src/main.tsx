@@ -43,6 +43,7 @@ import {
   XCircle,
 } from "lucide-react";
 import "./styles.css";
+import { AccountSettings, type AccountUser } from './AccountSettings';
 
 type Disk = {
   name: string;
@@ -119,7 +120,7 @@ type Audit = {
   details?: unknown;
   targetId?: string;
 };
-type User = { username: string; role: string };
+type User = AccountUser;
 type View =
   | "overview"
   | "endpoints"
@@ -929,7 +930,7 @@ function App() {
             </span>
             <div>
               <strong>{user.username}</strong>
-              <small>Administrator</small>
+              <small>{titleCase(user.role)}</small>
             </div>
             <button
               aria-label="Sign out"
@@ -1932,7 +1933,7 @@ function App() {
             </section>
           )}
           {view === "settings" && (
-            <div className="settings-grid">
+            <><AccountSettings user={user} request={api} onProfile={setUser}/><div className="settings-grid">
               <section className="panel settings-card">
                 <div className="settings-card-heading">
                   <span className="settings-icon">
@@ -2103,7 +2104,7 @@ function App() {
                   </p>
                 </section>
               </div>
-            </div>
+            </div></>
           )}
           <footer className="workspace-footer">
             <span>

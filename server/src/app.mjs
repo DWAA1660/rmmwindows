@@ -5,6 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
+import { mountAccounts, publicUser } from './accounts.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -108,7 +109,7 @@ export function createApp(options = {}) {
   function operator(req, res, next) {
     const token = cookies(req.headers.cookie).rmm_session;
     if (!token) return res.status(401).json({ error: 'Sign in required.' });
-    const session = db.prepare('SELECT s.*, u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE token_hash=? AND expires_at>?').get(hashToken(token), nowIso());
+    const session = db.prepare('SELECT s.*, u.username,u.email,u.role,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE token_hash=? AND expires_at>? AND u.disabled=0').get(hashToken(token), nowIso());
     if (!session) return res.status(401).json({ error: 'Session expired. Sign in again.' });
     req.operator = session; next();
   }
@@ -160,18 +161,19 @@ export function createApp(options = {}) {
   app.post('/api/auth/login', rateLimiter({ limit: 10, intervalMs: 15 * 60000 }), checkOrigin, (req, res) => {
     const login = str(req.body.username, 'username', { max: 100 });
     const password = str(req.body.password, 'password', { max: 1024 });
-    const user = db.prepare('SELECT * FROM users WHERE username=?').get(login);
+    const user = db.prepare('SELECT * FROM users WHERE lower(username)=lower(?)').get(login);
     const valid = verifyPassword(password, user?.password_hash || dummyPassword);
-    if (!user || !valid) { audit('anonymous', 'auth.login.failed', null); return res.status(401).json({ error: 'Invalid username or password.' }); }
+    if (!user || !valid || user.disabled) { audit('anonymous', 'auth.login.failed', null); return res.status(401).json({ error: 'Invalid username or password.' }); }
     const token = randomToken(); const csrfToken = randomToken();
     const expires = new Date(Date.now() + 12 * 3600000).toISOString();
     db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(nowIso());
     db.prepare('INSERT INTO sessions VALUES (?,?,?,?)').run(hashToken(token), user.id, csrfToken, expires);
     res.cookie('rmm_session', token, { httpOnly: true, secure: Boolean(secureCookie), sameSite: 'strict', maxAge: 12 * 3600000, path: '/' });
     audit(user.username, 'auth.login', null);
-    res.json({ user: { username: user.username, role: 'admin' }, csrfToken });
+    res.json({ user: publicUser(user), csrfToken });
   });
-  app.get('/api/auth/me', operator, (req, res) => res.json({ user: { username: req.operator.username, role: 'admin' }, csrfToken: req.operator.csrf_token }));
+  app.get('/api/auth/me', operator, (req, res) => res.json({ user: publicUser(req.operator), csrfToken: req.operator.csrf_token }));
+  mountAccounts(app, { db, operator, csrf, audit, fail, str });
   app.post('/api/auth/logout', operator, csrf, (req, res) => {
     db.prepare('DELETE FROM sessions WHERE token_hash=?').run(req.operator.token_hash);
     res.clearCookie('rmm_session', { path: '/', secure: Boolean(secureCookie), sameSite: 'strict', httpOnly: true });
@@ -280,6 +282,14 @@ export function createApp(options = {}) {
 
   const admin = express.Router();
   admin.use(operator, csrf);
+  admin.use((req, res, next) => {
+    const role = req.operator.role;
+    const path = req.path.toLowerCase().replace(/\/+$/, '');
+    if (!['admin', 'operator', 'viewer'].includes(role)) return res.status(403).json({error:'Account role is not authorized.'});
+    if (role !== 'admin' && (path.startsWith('/settings/update') || path === '/audit')) return res.status(403).json({error:'Administrator access required.'});
+    if (role === 'viewer' && !['GET','HEAD','OPTIONS'].includes(req.method)) return res.status(403).json({error:'Read-only accounts cannot change endpoints or run commands.'});
+    next();
+  });
   admin.get('/endpoints', (req, res) => res.json(db.prepare('SELECT * FROM endpoints ORDER BY display_name COLLATE NOCASE').all().map(endpointView)));
   admin.get('/endpoints/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);

@@ -43,7 +43,16 @@
 
 ## Current limitations / next milestones
 
-- One administrator role, no MFA/SSO or account/password-management UI yet.
+## 2026-11-04 — Accounts and roles
+
+- Settings now includes own email/password changes and admin user creation, email editing, role selection, disabling/re-enabling and password resets. Roles are administrator, operator and viewer; permissions are enforced by the API including URL case/trailing-slash variants.
+- Additive schema v2 preserves existing account credentials and durable management state. Last-admin protection, sensitive-action current-password confirmation, CSRF/origin checks, rate limits, audit without secrets, immediate session revocation on password/access changes, and case-insensitive unique usernames implemented.
+- Email is contact-only, not a login identifier or verified/reset-email channel. Disabled accounts retain historical attribution; no destructive user deletion route.
+- Local server account lifecycle/migration tests and frontend production compilation pass. Deployment and live UI verification pending.
+
+## Current limitations / next milestones
+
+- MFA/SSO and email delivery/verification remain future work.
 - Metrics are inventory snapshots (15-minute full inventory by default), not a historical time-series telemetry system.
 - No actual screen viewing until a consented visible desktop companion is built; no remote input control.
 - Unsigned PowerShell installer package; signed MSI/EXE and Action1 integration remain later.
