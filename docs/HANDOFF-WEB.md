@@ -2,6 +2,8 @@
 
 ## Delivered
 
+Website installation follow-up: Add endpoints includes `AgentInstaller` with direct install-script and ZIP links, current version/size/SHA256 and a copy-command button. It reads public `/api/agent-download` metadata; no token is included in the command. The endpoint prompts securely during installation. Availability errors disable the download/copy actions. Production UI and clipboard success were verified; screenshot is ignored at artifacts/website-agent-install.png.
+
 `web/` contains a React 19 + TypeScript + Vite operational console with Lucide icons and locally bundled variable Manrope / DM Sans fonts. No CDN or external font connection is required; the server's self-only CSP works. Visual direction: dark blue-green sidebar, light neutral workspace, restrained sage/teal health indicators, compact inventory tables, and clear empty states. Responsive navigation collapses to a mobile drawer.
 
 Implemented against the real `/api` contract, without fake fleet data:

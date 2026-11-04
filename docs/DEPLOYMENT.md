@@ -50,6 +50,8 @@ After host inspection and read-only deploy key registration, `deploy/bootstrap-h
 
 ## Automatic and manual application updates
 
+The completed image now includes public agent distribution: the .NET10 SDK build stage cross-publishes Windows x64, a packaging stage bundles Install/Uninstall scripts and checksum manifests, and runtime serves `/install.ps1` and `/downloads/…`. No host .NET SDK, GitHub download credential or extra host volume is needed. Runtime COPY uses explicit node ownership because the updater's restrictive umask can create root-only checkout files. CI executes `server/test/container-smoke.mjs` inside the final image as the real unprivileged user before publication.
+
 Push reviewed code to private GitHub `main`. GitHub Actions tests server, builds web and agent, and publishes GHCR images. The host's read-only deploy key fetches `main` every five minutes. It builds the app with Docker (including server tests and frontend compilation), backs up SQLite, then recreates **only** service `rmm` and waits for health. The Settings button requests the same process immediately and also forces a restart when already current.
 
 The current installation uses private GitHub source pull/build, so the host requires no broad GitHub PAT or GHCR credentials. CI additionally publishes images to `ghcr.io/dwaa1660/rmmwindows:main` and immutable SHA tags for future image-only deployments. It does not deploy an untested agent to endpoints automatically.

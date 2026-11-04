@@ -4,6 +4,10 @@ Self-hosted Windows endpoint management with a Linux web console, Windows servic
 
 Target: **https://rmm.parkcountylibrary.org** · [Private source repository](https://github.com/DWAA1660/rmmwindows)
 
+## Install an endpoint
+
+In the web console, open **Add endpoints**, create an enrollment token, then copy the administrator PowerShell install command. [Install script](https://rmm.parkcountylibrary.org/install.ps1) and [agent ZIP](https://rmm.parkcountylibrary.org/downloads/library-rmm-agent-win-x64.zip) are hosted directly on the website; no GitHub login is required on endpoints. The script verifies the package checksum and securely prompts for your token. See `installer/README.md` for the command, download-only validation and manual installation.
+
 ## Workspaces
 
 - `server/` — authenticated Node 24+ / Express API and SQLite durable state.
