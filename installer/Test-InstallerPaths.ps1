@@ -18,7 +18,7 @@ function Assert-Rejected([scriptblock]$Action, [string]$Description) {
     if (-not $rejected) { throw "Unsafe path accepted: $Description" }
     Write-Host "PASS $Description"
 }
-foreach ($unsafePath in @([IO.Path]::GetPathRoot($env:SystemRoot), $env:SystemRoot, $env:ProgramFiles, $env:ProgramData, [Environment]::GetFolderPath('UserProfile'), (Join-Path $env:SystemRoot 'LibraryRmm'), (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'LibraryRmm'), '\\server\LibraryRmm')) {
+foreach ($unsafePath in @([IO.Path]::GetPathRoot($env:SystemRoot), $env:SystemRoot, $env:ProgramFiles, $env:ProgramData, [Environment]::GetFolderPath('UserProfile'), (Join-Path $env:SystemRoot 'LibraryRmm'), (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'LibraryRmm'), '\\server\LibraryRmm', 'LibraryRmm', 'C:LibraryRmm')) {
     Assert-Rejected { Assert-LocalDirectory $unsafePath } 'system/profile/shared target refused'
 }
 $installDefault = Join-Path $env:ProgramFiles 'LibraryRmm'

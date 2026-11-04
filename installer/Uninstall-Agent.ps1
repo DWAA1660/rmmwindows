@@ -23,6 +23,18 @@ foreach ($target in @($absoluteInstall, $absoluteData)) {
         $current = $current.Parent
     }
 }
+foreach ($ownedTarget in @(@{ path = $absoluteInstall; role = 'install' }, @{ path = $absoluteData; role = 'data' })) {
+    if (-not (Test-Path -LiteralPath $ownedTarget.path -PathType Container)) { continue }
+    if (-not (Get-ChildItem -LiteralPath $ownedTarget.path -Force | Select-Object -First 1)) { continue }
+    $markerPath = Join-Path $ownedTarget.path '.library-rmm-owned.json'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { throw 'Refusing to remove a nonempty directory without a Library RMM ownership marker.' }
+    $markerFile = Get-Item -LiteralPath $markerPath -Force
+    if ($markerFile.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing an ownership marker reparse point.' }
+    try { $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json } catch { throw 'Invalid Library RMM ownership marker.' }
+    if ($marker.product -ne 'ParkCountyLibrary.LibraryRmm' -or $marker.directoryRole -ne $ownedTarget.role -or $marker.schemaVersion -ne 1) {
+        throw 'Refusing to remove a directory owned by another product or installation role.'
+    }
+}
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($existing) {
     $serviceInfo = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"

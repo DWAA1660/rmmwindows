@@ -101,7 +101,7 @@ try {
   const full = await downloaded.text();
   assert.ok(full.includes('stderr-complete'));
   assert.equal(full, chunks.map(c => c.text).join(''));
-  console.log(`PASS real Windows agent/API: ${Buffer.byteLength(expected)} UTF-8 stdout bytes, stderr, ${chunks.length} chunks, full download, no redispatch.`);
+  console.log(`PASS real .NET 10 Windows agent/API: ${Buffer.byteLength(expected)} UTF-8 stdout bytes, stderr, ${chunks.length} chunks, full download, no redispatch.`);
 } finally {
   phase('Stopping isolated agent and API.');
   if (child && child.exitCode === null) {

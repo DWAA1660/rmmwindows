@@ -29,7 +29,7 @@ Re-run the installer from a newer extracted package to update the service while 
 # Permanently removes local enrollment and pending output as well.
 ```
 
-Revoke the endpoint in the console after decommissioning. The uninstall script automatically cleans only directories named `LibraryRmm`; manually review custom installation paths.
+Revoke the endpoint in the console after decommissioning. The uninstall script automatically cleans only dedicated directories named `LibraryRmm` with the expected ownership markers. Unrelated existing directories are refused.
 
 ## Output and interruption behavior
 
