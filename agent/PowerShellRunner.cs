@@ -36,6 +36,12 @@ public sealed class PowerShellRunner
                     break
                 } catch { }
             }
+            # sfc.exe buffers ~4 KB when its stdout is a pipe, so its progress arrived in bursts
+            # minutes apart. These run sfc/dism (and anything passed to Invoke-LiveConsole) in a
+            # pseudo console through the agent's relay, which streams each progress update.
+            # Simple functions: $args passes /scannow, -n, --x etc. through untouched. Typing
+            # sfc.exe/dism.exe explicitly bypasses the relay. $LASTEXITCODE is the program's.
+            {{LiveConsoleFunctions()}}
             $global:LASTEXITCODE = 0
             try {
                 # Do not pipe the whole script through a formatting cmdlet: PowerShell then
@@ -75,6 +81,20 @@ public sealed class PowerShellRunner
         foreach (var argument in new[] { "/r", "/t", delaySeconds.ToString(System.Globalization.CultureInfo.InvariantCulture), "/d", "p:0:0", "/c", reason })
             start.ArgumentList.Add(argument);
         return RunProcessAsync(start, onOutput, 15, ct);
+    }
+
+    /// <summary>PowerShell definitions that route sfc/dism through <see cref="ConsoleRelay"/> (this agent executable).</summary>
+    internal static string LiveConsoleFunctions()
+    {
+        static string Literal(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        var executable = Environment.ProcessPath ?? throw new InvalidOperationException("The agent executable path is unknown.");
+        var relay = "& " + Literal(executable);
+        // Under `dotnet LibraryRmm.Agent.dll` (development, integration test) the host needs the assembly.
+        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            relay += " " + Literal(Path.Combine(AppContext.BaseDirectory, "LibraryRmm.Agent.dll"));
+        return "function global:Invoke-LiveConsole { " + relay + " '--console-relay' @args }\n"
+            + "function global:sfc { Invoke-LiveConsole sfc.exe @args }\n"
+            + "function global:dism { Invoke-LiveConsole dism.exe @args }";
     }
 
     public static string PowerShellPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");

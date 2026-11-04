@@ -24,7 +24,7 @@ Public downloads do not authorize enrollment or management. Authenticated operat
 
 Inventory `{hostname,osName,osVersion,architecture,domain,domainJoined,ipv4:[],loggedOnUser,bootTime,cpuPercent,memoryTotalBytes,memoryUsedBytes,agentVersion,disks:[{name,label,totalBytes,freeBytes}],software:[{name,version,publisher,installDate}]}`. Metrics may be null when unavailable. `bootId` is Windows last boot UTC timestamp.
 
-PowerShell payload `{script}`. Reboot payload `{delaySeconds:30,reason}` with delay >=30 seconds. Inventory payload `{}`. Storage payload `{path:"C:\\"}` lists direct child file/folder sizes read-only with errors, bounded recursive traversal; emits structured JSON as stdout. No file deletion or arbitrary remote file content route.
+PowerShell payload `{script}`. The agent's wrapper defines `Invoke-LiveConsole <program> <args>` (runs a console program in a pseudo console through `LibraryRmm.Agent.exe --console-relay` so pipe-buffering tools stream progress live; output is plain UTF-8 text with `\r` progress rewrites, exit code preserved) and `sfc`/`dism` functions that use it; `sfc.exe`/`dism.exe` typed explicitly bypass it. Reboot payload `{delaySeconds:30,reason}` with delay >=30 seconds. Inventory payload `{}`. Storage payload `{path:"C:\\"}` lists direct child file/folder sizes read-only with errors, bounded recursive traversal; emits structured JSON as stdout. No file deletion or arbitrary remote file content route.
 
 ## Operator protocol (owned by server + web)
 

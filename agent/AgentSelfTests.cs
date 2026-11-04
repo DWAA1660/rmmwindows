@@ -27,7 +27,15 @@ internal static class AgentSelfTests
             ("unsafe storage paths are rejected", StoragePathAsync),
             ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
             ("updater stages only verified packages and never loops", UpdaterStagingAsync),
-            ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync)
+            ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync),
+            ("VT screen updates convert to plain text with CR progress", ConsoleRelayTests.ConverterAsync),
+            ("relay command line round-trips arguments and searches PATH only", ConsoleRelayTests.CommandLineQuotingAsync),
+            ("pipe-buffering child run directly shows progress only at exit", ConsoleRelayTests.DirectBufferedProgressAsync),
+            ("Invoke-LiveConsole streams buffered progress live and keeps the exit code", ConsoleRelayTests.RelayLiveProgressAsync),
+            ("relayed program is killed with the job on timeout (no orphans)", ConsoleRelayTests.RelayTimeoutKillsTreeAsync),
+            ("Unicode and wide-character progress survive the relay", ConsoleRelayTests.RelayUnicodeAsync),
+            ("relay passes arguments untouched and reports missing programs", ConsoleRelayTests.RelayArgumentsAsync),
+            ("relay keeps long scrolling output and wide lines complete", ConsoleRelayTests.RelayLongOutputAsync)
         };
         var failed = 0;
         foreach (var test in tests)
