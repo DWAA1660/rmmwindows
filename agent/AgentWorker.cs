@@ -84,7 +84,8 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
             try { await spool.FlushAsync(api, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception exception) { logger.LogWarning("Output delivery deferred ({FailureType}); local journal retained.", exception.GetType().Name); }
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            // Short interval so command output reaches the console within about a second.
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
         }
     }
 

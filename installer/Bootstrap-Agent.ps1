@@ -17,6 +17,19 @@ if ($ServerUrl.Scheme -ne 'https' -or $ServerUrl.UserInfo -or $ServerUrl.Query -
 if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
     throw 'This download supports Windows x64. An ARM64 package is not currently hosted.'
 }
+# Deployment tools such as Action1 "Run script" may start 32-bit PowerShell. Under WOW64,
+# Program Files and the registry are redirected, so relaunch in native 64-bit PowerShell.
+if (-not [Environment]::Is64BitProcess -and $env:PROCESSOR_ARCHITEW6432 -eq 'AMD64') {
+    if ($EnrollmentToken) { throw 'Run from 64-bit PowerShell to pass -EnrollmentToken.' }
+    $native = Join-Path $env:WINDIR 'sysnative\WindowsPowerShell\v1.0\powershell.exe'
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ServerUrl', $ServerUrl.AbsoluteUri.TrimEnd('/'))
+    if ($DownloadOnly) { $relaunch += '-DownloadOnly' }
+    if ($PromptForToken) { $relaunch += '-PromptForToken' }
+    Write-Host 'Started in 32-bit PowerShell; continuing in 64-bit PowerShell.'
+    & $native @relaunch
+    exit $LASTEXITCODE
+}
+Write-Host ('Library RMM setup running as ' + [Security.Principal.WindowsIdentity]::GetCurrent().Name + ' (64-bit PowerShell ' + $PSVersionTable.PSVersion + ').')
 if (-not $DownloadOnly) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)

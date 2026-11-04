@@ -46,6 +46,8 @@ import "./styles.css";
 import { AccountSettings, type AccountUser } from './AccountSettings';
 import { progressOutput } from './progress';
 import { JoinRequests, type JoinRequest } from './JoinRequests';
+import { EndpointPicker } from './EndpointPicker';
+import { BatchResults } from './BatchResults';
 
 type Disk = {
   name: string;
@@ -497,6 +499,7 @@ function App() {
     [detailTab, setDetailTab] = useState<"overview" | "software">("overview"),
     [softwareSearch, setSoftwareSearch] = useState("");
   const [jobDetail, setJobDetail] = useState<Job | null>(null),
+    [batch, setBatch] = useState<Job[] | null>(null),
     [command, setCommand] = useState<{
       ids: string[];
       kind: string;
@@ -643,6 +646,8 @@ function App() {
       setCommand(null);
       await refresh();
       if (result.jobs.length === 1) setJobDetail(result.jobs[0]);
+      // Several computers: show every result live side by side.
+      else if (kind === "powershell") setBatch(result.jobs);
       else changeView("activity");
     } catch (err) {
       fail(err);
@@ -1053,6 +1058,24 @@ function App() {
                     <RefreshCw size={15} className={loading ? "spin" : ""} />
                     Refresh
                   </button>
+                  {user.role !== "viewer" && (
+                    <button
+                      className="button secondary"
+                      disabled={!active.length}
+                      onClick={() =>
+                        setCommand({
+                          kind: "powershell",
+                          ids: selected,
+                          script: "",
+                          path: "C:\\",
+                          chooseEndpoints: true,
+                        })
+                      }
+                    >
+                      <Terminal size={15} />
+                      Run PowerShell
+                    </button>
+                  )}
                   <button
                     className="button primary"
                     onClick={() => changeView("enrollment")}
@@ -2458,32 +2481,15 @@ function App() {
               );
             }}
           >
-            {command.chooseEndpoints && (
-              <label className="field">
-                Run on endpoints
-                <select
-                  multiple
-                  required
-                  className="multi-select"
+            {(command.chooseEndpoints || command.kind === "powershell") && (
+              <div className="field">
+                Run on computers
+                <EndpointPicker
+                  endpoints={active}
                   value={command.ids}
-                  onChange={(e) =>
-                    setCommand({
-                      ...command,
-                      ids: Array.from(
-                        e.target.selectedOptions,
-                        (option) => option.value,
-                      ),
-                    })
-                  }
-                >
-                  {active.map((ep) => (
-                    <option key={ep.id} value={ep.id}>
-                      {endpointName(ep)} {ep.online ? "· Online" : "· Offline"}
-                    </option>
-                  ))}
-                </select>
-                <small>Use Ctrl or Command to choose multiple computers.</small>
-              </label>
+                  onChange={(ids) => setCommand({ ...command, ids })}
+                />
+              </div>
             )}
             {command.kind === "powershell" && (
               <>
@@ -2577,7 +2583,7 @@ function App() {
                 </button>
                 <button
                   type="submit"
-                  disabled={busy}
+                  disabled={busy || !command.ids.length}
                   className={`button ${command.kind === "reboot" ? "danger" : "primary"}`}
                 >
                   {busy ? (
@@ -2591,7 +2597,9 @@ function App() {
                     ? "Confirm reboot"
                     : command.kind === "storage"
                       ? "Start scan"
-                      : "Run script"}
+                      : command.ids.length > 1
+                        ? `Run on ${command.ids.length} computers`
+                        : "Run script"}
                 </button>
               </div>
             </div>
@@ -2825,6 +2833,21 @@ function App() {
               }}
             />
           )}
+        </Modal>
+      )}
+      {batch && (
+        <Modal
+          title={`Results · ${batch.length} computers`}
+          subtitle="Live output from every computer. Each job runs at most once."
+          wide
+          onClose={() => setBatch(null)}
+        >
+          <BatchResults
+            jobs={batch}
+            nameOf={(id) => endpointName(endpoints.find((ep) => ep.id === id))}
+            request={api}
+            onOpen={(job) => setJobDetail(job as Job)}
+          />
         </Modal>
       )}
       {jobDetail && (
@@ -3115,7 +3138,8 @@ function JobOutput({
   };
   useEffect(() => {
     void load();
-    const interval = window.setInterval(() => void load(), 2500);
+    // Poll quickly so progress feels live; load() skips overlapping requests.
+    const interval = window.setInterval(() => void load(), 1000);
     return () => window.clearInterval(interval);
   }, [initial.id]);
   useEffect(() => {
@@ -3333,8 +3357,8 @@ function JobOutput({
             : "All available output loaded. No server-side truncation."}
         </span>
         <span>
-          {loading && <Loader2 size={13} className="spin" />}Updates every 2.5
-          seconds
+          {loading && <Loader2 size={13} className="spin" />}Updates every
+          second
         </span>
       </div>
       <div className="modal-footer">
@@ -3386,7 +3410,9 @@ function AgentInstaller() {
       .catch(reason => { if (active) setError(reason.message); });
     return () => { active = false; };
   }, []);
-  const command = `$installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'\nInvoke-WebRequest -UseBasicParsing '${window.location.origin}/install.ps1' -OutFile $installer\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer`;
+  // Works in an administrator PowerShell window and unattended as SYSTEM (e.g. Action1
+  // "Run script", 32- or 64-bit). A failure throws, so deployment tools report it as failed.
+  const command = `$ProgressPreference = 'SilentlyContinue'\n[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12\n$installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'\nInvoke-WebRequest -UseBasicParsing '${window.location.origin}/install.ps1' -OutFile $installer\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer\nif ($LASTEXITCODE -ne 0) { throw "Library RMM install failed with exit code $LASTEXITCODE" }`;
   return <section className="panel agent-installer">
     <div className="panel-heading"><div><h2>Install from this website</h2><p>Open Windows PowerShell as administrator on the computer you want to manage.</p></div><Download size={20}/></div>
     <div className="agent-installer-body">
@@ -3398,6 +3424,7 @@ function AgentInstaller() {
       <div className="agent-command-heading"><strong>Or copy and run this command</strong><button className="button small secondary" disabled={!manifest} onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError("Clipboard unavailable. Select and copy the command below."); } }}>{copied ? <Check size={14}/> : <Copy size={14}/>} {copied ? "Copied" : "Copy command"}</button></div>
       <pre className="agent-install-command"><code>{command}</code></pre>
       <p className="muted">The script verifies the package checksum and installs the agent, which then waits for your approval under Waiting for approval above. Re-running it updates an existing agent while preserving its identity. No reboot is required.</p>
+      <p className="muted"><strong>Action1 or other deployment tools:</strong> paste the same command into a "Run script" action (PowerShell). It runs unattended as SYSTEM, switches to 64-bit PowerShell automatically, needs no token, and reports failure if the install fails. Each computer then appears under Waiting for approval.</p>
       {manifest && <details className="agent-package-integrity"><summary>Package SHA256</summary><code>{manifest.sha256}</code><a className="text-button" href="/downloads/library-rmm-agent-win-x64.zip.sha256" download>Download checksum</a></details>}
       {manifest && error && <p role="alert" className="danger-text">{error}</p>}
     </div>

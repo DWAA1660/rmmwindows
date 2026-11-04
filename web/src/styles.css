@@ -3610,3 +3610,24 @@ td:last-child {
 .join-history { padding:0 23px 18px; }
 .join-history summary { cursor:pointer;font-size:12px;color:#31665a;padding:8px 0; }
 @media (max-width: 720px) { .join-actions { flex-direction:column;align-items:stretch; } }
+/* Endpoint picker (run on one or many computers) */
+.endpoint-picker { display:flex;flex-direction:column;gap:8px;margin-top:6px; }
+.endpoint-picker-bar { display:flex;flex-wrap:wrap;gap:8px;align-items:center; }
+.endpoint-picker-search { display:flex;align-items:center;gap:6px;flex:1;min-width:180px;border:1px solid #dfe5e3;border-radius:6px;padding:0 9px;background:#fff; }
+.endpoint-picker-search input { border:0;outline:0;padding:7px 0;width:100%;background:transparent;font:inherit; }
+.endpoint-picker-list { max-height:220px;overflow:auto;border:1px solid #dfe5e3;border-radius:6px;background:#fff; }
+.endpoint-picker-list label { display:grid;grid-template-columns:auto auto 1fr auto;align-items:center;gap:9px;padding:8px 11px;border-bottom:1px solid #eef2f1;cursor:pointer;font-weight:400; }
+.endpoint-picker-list label:last-child { border-bottom:0; }
+.endpoint-picker-list label.chosen { background:#edf6f1; }
+.endpoint-picker-list small { color:#6b7a78;font-size:11px; }
+.endpoint-picker-list .live-dot.offline { background:#b9c3c0;box-shadow:none;animation:none; }
+/* Live results for one command on many computers */
+.batch-results { display:flex;flex-direction:column;gap:14px; }
+.batch-summary { display:flex;flex-wrap:wrap;gap:8px; }
+.batch-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;max-height:65vh;overflow:auto; }
+.batch-card { display:flex;flex-direction:column;border:1px solid #dfe5e3;border-radius:8px;overflow:hidden;background:#fff;min-width:0; }
+.batch-card header, .batch-card footer { display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px; }
+.batch-card footer small { color:#6b7a78;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.batch-card progress { width:100%;height:6px;accent-color:#168376; }
+.batch-output { margin:0;height:190px;overflow:auto;background:#142a30;color:#d7e6e2;font:11px/1.45 ui-monospace,Consolas,monospace;padding:10px 12px;white-space:pre-wrap;word-break:break-word; }
+@media (max-width:720px) { .batch-grid { grid-template-columns:1fr; } }

@@ -5,10 +5,15 @@
 Open **Add endpoints** in the console and copy the install command. On the endpoint, open **Windows PowerShell as administrator** and run:
 
 ```powershell
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'
 Invoke-WebRequest -UseBasicParsing 'https://rmm.parkcountylibrary.org/install.ps1' -OutFile $installer
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+if ($LASTEXITCODE -ne 0) { throw "Library RMM install failed with exit code $LASTEXITCODE" }
 ```
+
+**Action1 (or any deployment tool):** paste the same block into a PowerShell "Run script" action. It runs unattended as SYSTEM, needs no token and no prompts, relaunches itself in 64-bit PowerShell if the tool starts 32-bit PowerShell (otherwise Program Files and the registry would be redirected), and throws on failure so the run is reported as failed. Approve the computers under Waiting for approval afterwards.
 
 The bootstrap downloads the agent from this server, checks its SHA256 before extraction, then installs it. No token is needed: the computer then appears in the console under **Add endpoints → Waiting for approval**, where you click Approve or Deny. To use an enrollment token instead (to skip approval), add `-PromptForToken`. Nothing needs to be downloaded from private GitHub on the endpoint. Re-running it upgrades an existing installation while preserving enrollment. Do not put tokens into download URLs or a shared script.
 
