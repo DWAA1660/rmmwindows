@@ -37,6 +37,15 @@ export function openDatabase(filename) {
       created_at TEXT NOT NULL, last_poll_at TEXT NOT NULL, decided_by TEXT, decided_at TEXT);
     CREATE INDEX IF NOT EXISTS join_requests_status ON join_requests(status, created_at);
     PRAGMA user_version=3;`);
+  // Additive v4: remote file explorer downloads. Bytes live on disk next to the database (never in
+  // the web root); these rows track progress, integrity and expiry so disk use stays bounded.
+  db.exec(`CREATE TABLE IF NOT EXISTS file_transfers (job_id TEXT PRIMARY KEY REFERENCES jobs(id), endpoint_id TEXT NOT NULL,
+      path TEXT NOT NULL, name TEXT, status TEXT NOT NULL, size_bytes INTEGER, sha256 TEXT, received_bytes INTEGER NOT NULL DEFAULT 0,
+      next_sequence INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);
+    CREATE INDEX IF NOT EXISTS file_transfers_status ON file_transfers(status, created_at);
+    CREATE TABLE IF NOT EXISTS file_transfer_chunks (job_id TEXT NOT NULL REFERENCES file_transfers(job_id), sequence INTEGER NOT NULL,
+      byte_offset INTEGER NOT NULL, length INTEGER NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(job_id, sequence));
+    PRAGMA user_version=4;`);
   return db;
 }
 

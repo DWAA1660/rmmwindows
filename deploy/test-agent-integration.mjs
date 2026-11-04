@@ -129,6 +129,66 @@ try {
   assert.ok(full.includes('stderr-complete'));
   assert.equal(full, chunks.map(c => c.text).join(''));
   console.log(`PASS real .NET 10 Windows agent/API: ${Buffer.byteLength(expected)} UTF-8 stdout bytes, stderr, ${chunks.length} chunks, full download, no redispatch.`);
+
+  // Remote file explorer: list, mkdir/copy/delete and a multi-chunk download, all inside this
+  // test's temp folder. The long-poll claim should start each job within a moment.
+  phase('File explorer: list, change and download files in the isolated temp folder.');
+  const sample = join(temp, 'endpoint-files');
+  await mkdir(join(sample, 'Sub Folder'), { recursive: true });
+  const payloadBytes = randomBytes(5 * 1024 * 1024 + 4321);
+  await writeFile(join(sample, 'report ü.bin'), payloadBytes);
+  async function runFiles(payload, timeoutSeconds = 120) {
+    const queuedAt = Date.now();
+    const created = await api('/jobs', { method: 'POST', body: { endpointIds: [enrolled.endpointId], kind: 'files', payload, timeoutSeconds, idempotencyKey: randomUUID() } });
+    const jobId = created.jobs[0].id;
+    let current, pickedUpMs = null;
+    const until = Date.now() + 60000;
+    while (Date.now() < until) {
+      current = await api(`/jobs/${jobId}`);
+      if (pickedUpMs === null && current.status !== 'queued') pickedUpMs = Date.now() - queuedAt;
+      if (['succeeded', 'failed', 'interrupted', 'cancelled'].includes(current.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    let cursor = -1, more = true, text = '';
+    while (more) {
+      const page = await api(`/jobs/${jobId}/output?after=${cursor}&limit=1000`);
+      text += page.chunks.filter(chunk => chunk.stream === 'stdout').map(chunk => chunk.text).join('');
+      cursor = page.nextCursor; more = page.hasMore;
+    }
+    return { job: current, result: JSON.parse(text), pickedUpMs };
+  }
+  const listed = await runFiles({ action: 'list', path: sample });
+  assert.equal(listed.job.status, 'succeeded', listed.job.summary);
+  assert.ok(listed.pickedUpMs < 3000, `long-poll should start a job within moments (took ${listed.pickedUpMs} ms)`);
+  const byName = Object.fromEntries(listed.result.entries.map(entry => [entry.name, entry]));
+  assert.equal(byName['report ü.bin'].size, payloadBytes.length);
+  assert.equal(byName['Sub Folder'].type, 'directory');
+  const drives = await runFiles({ action: 'list', path: '' });
+  assert.ok(drives.result.drives.some(drive => drive.name.toUpperCase() === 'C:\\'), 'drive list includes C:');
+
+  const copied = await runFiles({ action: 'copy', sources: [join(sample, 'report ü.bin')], destinationDirectory: join(sample, 'Sub Folder') });
+  assert.equal(copied.job.status, 'succeeded', copied.job.summary);
+  assert.deepEqual(await readFile(join(sample, 'Sub Folder', 'report ü.bin')), payloadBytes);
+  const made = await runFiles({ action: 'mkdir', path: join(sample, 'New folder') });
+  assert.equal(made.job.status, 'succeeded', made.job.summary);
+  const removed = await runFiles({ action: 'delete', paths: [join(sample, 'Sub Folder'), join(sample, 'New folder'), join(sample, 'missing.txt')], recursive: true });
+  assert.equal(removed.job.status, 'failed', 'one missing item makes the job report a failure');
+  assert.equal(removed.result.succeeded, 2); assert.equal(removed.result.failed, 1);
+  assert.ok(!existsSync(join(sample, 'Sub Folder')) && !existsSync(join(sample, 'New folder')), 'deleted folders are gone');
+  const refused = await runFiles({ action: 'delete', paths: [join(agentDir, 'agent.json')], recursive: false });
+  assert.equal(refused.result.failed, 1, 'the agent data folder is protected');
+  assert.ok(existsSync(join(agentDir, 'agent.json')));
+
+  const fetched = await runFiles({ action: 'download', path: join(sample, 'report ü.bin') }, 600);
+  assert.equal(fetched.job.status, 'succeeded', fetched.job.summary);
+  assert.equal(fetched.result.chunks, 3, 'a 5 MiB file is sent in 2 MiB chunks');
+  const file = await fetch(base + `/api/jobs/${fetched.job.id}/file`, { headers: { Cookie: cookie }, signal: AbortSignal.timeout(30000) });
+  assert.equal(file.status, 200);
+  assert.match(file.headers.get('content-disposition'), /filename\*=UTF-8''report%20%C3%BC\.bin/);
+  const received = Buffer.from(await file.arrayBuffer());
+  assert.ok(received.equals(payloadBytes), 'downloaded bytes match the file on the endpoint');
+  assert.equal(file.headers.get('x-content-sha256'), fetched.result.sha256);
+  console.log(`PASS file explorer: list (picked up in ${listed.pickedUpMs} ms), drives, copy, mkdir, per-item delete, protected refusal, ${payloadBytes.length}-byte download identical.`);
 } finally {
   phase('Stopping isolated agent and API.');
   if (child && child.exitCode === null) {
