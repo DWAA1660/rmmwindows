@@ -1,7 +1,7 @@
 // Real Windows agent -> real API smoke test. No service install, reboot, or production access.
 import { createApp } from '../server/src/app.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, sep } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -48,16 +48,14 @@ try {
     return result;
   }
   csrf = (await api('/auth/login', { method: 'POST', body: { username: 'integration-test', password } })).csrfToken;
-  const enrollment = await api('/enrollment-tokens', { method: 'POST', body: { label: 'Isolated integration', maxUses: 1, expiresInHours: 1 } });
+  // Tokenless enrollment, exactly as the default installer configures it: the agent has only
+  // a device ID and a join secret, and must be approved in the console before it can work.
   const deviceId = randomUUID();
-  const enrolled = await api('/agent/enroll', { method: 'POST', body: {
-    enrollmentToken: enrollment.token, deviceId, hostname: 'INTEGRATION-ONLY'
-  } });
-  phase('Test endpoint enrolled; building and launching agent.');
+  phase('Building and launching a tokenless agent that must request to join.');
   const agentDir = join(temp, 'endpoint');
   await mkdir(agentDir);
   await writeFile(join(agentDir, 'agent.json'), JSON.stringify({ serverUrl: base, deviceId,
-    endpointId: enrolled.endpointId, agentToken: enrolled.agentToken, pollSeconds: 5,
+    joinSecret: randomBytes(32).toString('base64url'), pollSeconds: 5,
     inventoryMinutes: 15, allowInsecureLocalhost: true }));
   const built = spawnSync(dotnetPath, ['build', 'agent/LibraryRmm.Agent.csproj', '-c', 'Release', '--nologo'], { cwd: root, encoding: 'utf8' });
   assert.equal(built.status, 0, built.stdout + built.stderr);
@@ -67,6 +65,28 @@ try {
   child.on('error', error => { logs += `Agent spawn failed: ${error.message}`; });
   child.stdout.on('data', data => { logs = (logs + data).slice(-12000); });
   child.stderr.on('data', data => { logs = (logs + data).slice(-12000); });
+  const waitFor = async (label, check, ms = 90000) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const value = await check();
+      if (value) return value;
+      if (child.exitCode !== null) throw new Error(`Agent exited while waiting for ${label}: ${logs}`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    throw new Error(`Timed out waiting for ${label}: ${logs}`);
+  };
+  const joinRequest = await waitFor('join request', async () => (await api('/join-requests')).find(row => row.deviceId === deviceId));
+  assert.equal(joinRequest.status, 'pending');
+  assert.ok(!(await api('/endpoints')).some(row => row.deviceId === deviceId), 'No endpoint may exist before approval.');
+  await api(`/join-requests/${joinRequest.id}/approve`, { method: 'POST', body: {} });
+  phase('Join request approved; waiting for the agent to collect its credential (next 30 s poll).');
+  const persisted = await waitFor('approved credential', async () => {
+    const config = JSON.parse(await readFile(join(agentDir, 'agent.json'), 'utf8'));
+    return config.agentToken ? config : null;
+  });
+  const enrolled = { endpointId: persisted.endpointId, agentToken: persisted.agentToken };
+  assert.equal((await api('/join-requests')).find(row => row.deviceId === deviceId).endpointId, enrolled.endpointId);
+  assert.equal(persisted.deviceId, deviceId, 'Approval must keep the device identity.');
   const expected = 'RMM✓🙂'.repeat(30000);
   const request = await api('/jobs', { method: 'POST', body: { endpointIds: [enrolled.endpointId],
     kind: 'powershell', payload: { script: "[Console]::Out.Write(('RMM✓🙂' * 30000)); [Console]::Error.Write('stderr-complete')" },

@@ -5,7 +5,9 @@
 param(
     [uri]$ServerUrl = '__SERVER_ORIGIN__',
     [Security.SecureString]$EnrollmentToken,
-    [switch]$DownloadOnly
+    [switch]$DownloadOnly,
+    # Use an enrollment token instead of approving the computer in the console.
+    [switch]$PromptForToken
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -54,5 +56,7 @@ if ($DownloadOnly) {
 }
 $parameters = @{ ServerUrl = $origin }
 if ($EnrollmentToken) { $parameters.EnrollmentToken = $EnrollmentToken }
-# Existing installer securely prompts when a new endpoint needs a token; upgrades keep identity.
+if ($PromptForToken) { $parameters.PromptForToken = $true }
+# By default a new computer requests to join and waits for approval in the console;
+# upgrades keep their existing identity.
 & $installer @parameters

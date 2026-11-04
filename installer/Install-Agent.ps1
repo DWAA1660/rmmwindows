@@ -17,7 +17,9 @@ param(
     [string]$DataDirectory = (Join-Path $env:ProgramData 'LibraryRmm'),
     [ValidateRange(5, 300)][int]$PollSeconds = 10,
     [ValidateRange(1, 1440)][int]$InventoryMinutes = 15,
-    [switch]$AllowInsecureLocalhost
+    [switch]$AllowInsecureLocalhost,
+    # Use the older enrollment-token flow instead of requesting approval in the console.
+    [switch]$PromptForToken
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -114,12 +116,34 @@ Protect-Directory $DataDirectory
 Write-OwnershipMarker $InstallDirectory 'install'
 Write-OwnershipMarker $DataDirectory 'data'
 $configPath = Join-Path $DataDirectory 'agent.json'
+$joinPending = $false
 $serverOrigin = $ServerUrl.GetLeftPart([UriPartial]::Authority)
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
     if ($config.serverUrl.TrimEnd('/') -ne $serverOrigin) { throw 'Existing enrollment points to another server. Uninstall with -RemoveEnrollment before changing servers.' }
-    if (-not $config.agentToken -or -not $config.endpointId -or -not $config.deviceId) { throw 'Existing enrollment is incomplete; refusing to overwrite it.' }
-    Write-Host 'Existing endpoint enrollment will be preserved.'
+    # StrictMode throws on missing properties; a join-pending config has no token yet.
+    $field = { param($name) $property = $config.PSObject.Properties[$name]; if ($property) { [string]$property.Value } else { '' } }
+    $enrolled = (& $field 'agentToken') -and (& $field 'endpointId')
+    $joinPending = -not (& $field 'agentToken') -and (& $field 'joinSecret').Length -ge 32
+    if (-not (& $field 'deviceId') -or -not ($enrolled -or $joinPending)) { throw 'Existing enrollment is incomplete; refusing to overwrite it.' }
+    if ($joinPending) { Write-Host 'This computer is still waiting for approval in the console; its join request will be preserved.' }
+    else { Write-Host 'Existing endpoint enrollment will be preserved.' }
+} elseif (-not $EnrollmentToken -and -not $PromptForToken) {
+    # Default: no token. The service asks the server to join and waits for an operator to
+    # approve this computer under Add endpoints. No credential exists until approval.
+    $secretBytes = New-Object byte[] 32
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($secretBytes) } finally { $generator.Dispose() }
+    $config = [pscustomobject]@{
+        serverUrl = $serverOrigin; deviceId = [guid]::NewGuid().ToString('D')
+        joinSecret = [Convert]::ToBase64String($secretBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        pollSeconds = $PollSeconds; inventoryMinutes = $InventoryMinutes
+        allowInsecureLocalhost = [bool]$AllowInsecureLocalhost
+    }
+    $temporary = $configPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    [IO.File]::WriteAllText($temporary, ($config | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $temporary -Destination $configPath
+    $joinPending = $true
 } else {
     if (-not $EnrollmentToken) { $EnrollmentToken = Read-Host 'Enrollment token from the RMM console' -AsSecureString }
     $pointer = [IntPtr]::Zero
@@ -167,6 +191,26 @@ if ($existing) {
 Get-ChildItem -LiteralPath $BinaryDirectory -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $InstallDirectory $_.Name) -Force
 }
+# Register in Control Panel > Programs and Features and Settings > Apps, with an uninstaller
+# that lives next to the agent (the setup folder may be a deleted temporary directory).
+$uninstallScript = Join-Path $InstallDirectory 'Uninstall-Agent.ps1'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-Agent.ps1') -Destination $uninstallScript -Force
+$displayVersion = (Get-Item -LiteralPath $targetExe).VersionInfo.ProductVersion
+if ($displayVersion) { $displayVersion = ($displayVersion -split '\+')[0] }
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { $displayVersion = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).version }
+$powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$uninstallCommand = '"' + $powershellExe + '" -NoProfile -ExecutionPolicy Bypass -File "' + $uninstallScript + '" -InstallDirectory "' + $InstallDirectory + '" -DataDirectory "' + $DataDirectory + '" -RemoveEnrollment'
+$uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LibraryRmmAgent'
+New-Item -Path $uninstallKey -Force | Out-Null
+$sizeKb = [int]((Get-ChildItem -LiteralPath $InstallDirectory -File | Measure-Object -Property Length -Sum).Sum / 1024)
+$entries = @{
+    DisplayName = 'Library RMM Agent'; DisplayVersion = [string]$displayVersion; Publisher = 'Park County Library IT'
+    InstallLocation = $InstallDirectory; DisplayIcon = $targetExe; UninstallString = $uninstallCommand
+    QuietUninstallString = $uninstallCommand + ' -Quiet'; URLInfoAbout = $serverOrigin
+}
+foreach ($name in $entries.Keys) { New-ItemProperty -Path $uninstallKey -Name $name -Value $entries[$name] -PropertyType String -Force | Out-Null }
+foreach ($name in 'NoModify', 'NoRepair') { New-ItemProperty -Path $uninstallKey -Name $name -Value 1 -PropertyType DWord -Force | Out-Null }
+New-ItemProperty -Path $uninstallKey -Name 'EstimatedSize' -Value $sizeKb -PropertyType DWord -Force | Out-Null
 $binaryPath = '"' + $targetExe + '" --data-dir "' + $DataDirectory + '"'
 if ($existing) {
     $changed = Invoke-CimMethod -InputObject $serviceInfo -MethodName Change -Arguments @{ PathName = $binaryPath; StartMode = 'Automatic'; StartName = 'LocalSystem' }
@@ -179,5 +223,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to configure service recovery.' }
 Start-Service -Name $serviceName
 $installedService = Get-Service -Name $serviceName
 $installedService.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
-Write-Host ('Library RMM Agent installed and running. Endpoint ID: ' + $config.endpointId)
+if ($joinPending) {
+    Write-Host ('Library RMM Agent installed and running. ' + $env:COMPUTERNAME + ' is now waiting for approval:')
+    Write-Host '  open the RMM console > Add endpoints > Waiting for approval, then click Approve.'
+} else {
+    Write-Host ('Library RMM Agent installed and running. Endpoint ID: ' + $config.endpointId)
+}
 Write-Host 'Inventory appears after the next successful outbound check-in. No reboot was performed.'

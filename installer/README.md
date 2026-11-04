@@ -2,7 +2,7 @@
 
 ## Install directly from the RMM website
 
-Open **Add endpoints** in the console, create an enrollment token, and copy the install command. On the endpoint, open **Windows PowerShell as administrator** and run:
+Open **Add endpoints** in the console and copy the install command. On the endpoint, open **Windows PowerShell as administrator** and run:
 
 ```powershell
 $installer = Join-Path $env:TEMP 'Install-LibraryRmm.ps1'
@@ -10,7 +10,7 @@ Invoke-WebRequest -UseBasicParsing 'https://rmm.parkcountylibrary.org/install.ps
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
-The bootstrap downloads the agent from this server, checks its SHA256 before extraction, then starts the installer and securely prompts for a token. Nothing needs to be downloaded from private GitHub on the endpoint. Re-running it upgrades an existing installation while preserving enrollment. Do not put tokens into download URLs or a shared script.
+The bootstrap downloads the agent from this server, checks its SHA256 before extraction, then installs it. No token is needed: the computer then appears in the console under **Add endpoints → Waiting for approval**, where you click Approve or Deny. To use an enrollment token instead (to skip approval), add `-PromptForToken`. Nothing needs to be downloaded from private GitHub on the endpoint. Re-running it upgrades an existing installation while preserving enrollment. Do not put tokens into download URLs or a shared script.
 
 Direct ZIP: `https://rmm.parkcountylibrary.org/downloads/library-rmm-agent-win-x64.zip`. The website currently hosts x64 only. The Docker build cross-publishes the current agent and bundles its installer package with the web app, so future source updates keep downloads synchronized. Setup files remain in a uniquely named local temporary folder for inspection.
 
@@ -49,15 +49,28 @@ Files are installed under `%ProgramFiles%\LibraryRmm`; credentials and output de
 
 Re-run the installer from a newer extracted package to update the service while preserving its endpoint identity. Existing config intervals remain unchanged; edit the protected `agent.json` and restart the service to change them. The installer never reboots. Windows service recovery restarts only the agent process and never repeats endpoint commands.
 
-```powershell
-.\Uninstall-Agent.ps1
-# Retains enrollment and pending output for reinstall.
+## Uninstall
 
-.\Uninstall-Agent.ps1 -RemoveEnrollment
-# Permanently removes local enrollment and pending output as well.
+Installs and updates from the package dated 2026-11-04 or later register **Library RMM Agent** in **Control Panel → Programs and Features** and **Settings → Apps**. Uninstall there (approve the administrator prompt). It stops and deletes the service, removes `%ProgramFiles%\LibraryRmm`, `%ProgramData%\LibraryRmm` and the Programs and Features entry, and tells the server to retire the endpoint so the console shows it as revoked (queued jobs for it are cancelled). No reboot. Older installs gain the entry the next time they update or the install command is re-run.
+
+From an administrator PowerShell window, the same uninstaller is in the install folder:
+
+```powershell
+& "$env:ProgramFiles\LibraryRmm\Uninstall-Agent.ps1" -RemoveEnrollment
+# Removes everything and retires the endpoint in the console.
+
+& "$env:ProgramFiles\LibraryRmm\Uninstall-Agent.ps1"
+# Keeps enrollment and pending output in ProgramData for a later reinstall.
 ```
 
-Revoke the endpoint in the console after decommissioning. The uninstall script automatically cleans only dedicated directories named `LibraryRmm` with the expected ownership markers. Unrelated existing directories are refused.
+To uninstall remotely from the console, run this as a PowerShell job. It starts the uninstaller detached and delayed, so the job itself can finish and upload its output before the agent service is removed:
+
+```powershell
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep 20; & ''C:\Program Files\LibraryRmm\Uninstall-Agent.ps1'' -RemoveEnrollment -Quiet"'
+'Uninstall scheduled in 20 seconds.'
+```
+
+The uninstaller only removes dedicated directories named `LibraryRmm` that carry this installer's ownership markers, never follows junctions, and refuses unrelated directories.
 
 ## Output and interruption behavior
 

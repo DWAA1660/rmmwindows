@@ -8,8 +8,14 @@ public sealed record AgentConfiguration
 {
     public required string ServerUrl { get; init; }
     public required string DeviceId { get; init; }
-    public required string AgentToken { get; init; }
-    public required string EndpointId { get; init; }
+    /// <summary>Empty while a tokenless join request awaits operator approval; set once approved.</summary>
+    public string AgentToken { get; set; } = "";
+    public string EndpointId { get; set; } = "";
+    /// <summary>Device-generated secret proving ownership of this device's join request. Kept after
+    /// approval so a restore-on-reboot rollback of agent.json can recover a credential.</summary>
+    public string? JoinSecret { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool AwaitingApproval => string.IsNullOrEmpty(AgentToken);
     public int PollSeconds { get; init; } = 10;
     public int InventoryMinutes { get; init; } = 15;
     public bool AllowInsecureLocalhost { get; init; }
@@ -38,7 +44,9 @@ public sealed record AgentConfiguration
             throw new InvalidDataException("ServerUrl must be an HTTPS origin without credentials or a path.");
         if (uri.Scheme != Uri.UriSchemeHttps && !(AllowInsecureLocalhost && uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback))
             throw new InvalidDataException("Agent connections require HTTPS. HTTP is allowed only for an explicitly enabled loopback test.");
-        if (!Guid.TryParse(DeviceId, out _) || !Guid.TryParse(EndpointId, out _) || string.IsNullOrWhiteSpace(AgentToken))
+        var enrolled = Guid.TryParse(EndpointId, out _) && !string.IsNullOrWhiteSpace(AgentToken);
+        var awaitingApproval = string.IsNullOrEmpty(AgentToken) && JoinSecret is { Length: >= 32 and <= 200 };
+        if (!Guid.TryParse(DeviceId, out _) || !(enrolled || awaitingApproval))
             throw new InvalidDataException("Agent enrollment configuration is invalid.");
         if (PollSeconds is < 5 or > 300 || InventoryMinutes is < 1 or > 1440)
             throw new InvalidDataException("Agent polling configuration is outside its supported bounds.");
@@ -57,17 +65,21 @@ public sealed record JournalManifest(string Id, string Kind, DateTimeOffset Crea
 public sealed class AgentApi : IDisposable
 {
     private readonly HttpClient client;
+    private readonly AgentConfiguration configuration;
     public AgentApi(AgentConfiguration configuration) : this(configuration, new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false }) { }
     internal AgentApi(AgentConfiguration configuration, HttpMessageHandler handler)
     {
+        this.configuration = configuration;
         client = new HttpClient(handler) { BaseAddress = new Uri(configuration.ServerUrl.TrimEnd('/') + "/api/agent/"), Timeout = TimeSpan.FromSeconds(30) };
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", configuration.AgentToken);
         client.DefaultRequestHeaders.UserAgent.ParseAdd("LibraryRmm-Agent/" + AgentVersion.Value);
     }
 
     public async Task<T?> SendAsync<T>(HttpMethod method, string path, object body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, path) { Content = JsonContent.Create(body, options: AgentConfiguration.Json) };
+        // Read per request: the credential is filled in after a join request is approved.
+        if (configuration.AwaitingApproval) throw new InvalidOperationException("Agent is awaiting approval and has no credential yet.");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", configuration.AgentToken);
         using var response = await client.SendAsync(request, cancellationToken);
         // Never put response bodies, credentials, or script bodies in logs/exceptions.
         if (!response.IsSuccessStatusCode) throw new AgentApiException((int)response.StatusCode);

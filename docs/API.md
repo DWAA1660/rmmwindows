@@ -13,11 +13,13 @@ Public downloads do not authorize enrollment or management. Authenticated operat
 
 ## Agent protocol (owned by server + agent)
 
-- `POST /agent/enroll`: `{ enrollmentToken, deviceId, hostname }` -> `{endpointId,agentToken}`. Persist token in protected ProgramData; never log.
+- `POST /agent/join` (default, no token, unauthenticated, 30/min/IP): `{deviceId(uuid), joinSecret(32-200 chars), hostname, osName?, osVersion?, domain?, agentVersion?}` -> `{status:"pending"|"denied"}` or, once an operator approved it, `{status:"approved",endpointId,agentToken}`. Server stores only the secret's hash; a different secret for the same deviceId gets 403. Each approved poll ROTATES the agent token (recovers lost responses and restore-on-reboot rollbacks; the previous token stops working). A revoked endpoint is answered `denied`, never re-issued. Max 200 pending requests; pending requests not polled for 14 days are pruned. Agent polls every 30 s pending, 15 min denied.
+- `POST /agent/enroll` (optional token path): `{ enrollmentToken, deviceId, hostname }` -> `{endpointId,agentToken}`. Persist token in protected ProgramData; never log.
 - `POST /agent/checkin`: `{bootId, inventory}` -> `{endpointId,serverTime}`. `inventory` may be omitted for heartbeat. Canonical inventory below.
 - `POST /agent/jobs/claim`: `{}` -> `{job:null}` or `{job:{id,kind,payload,dispatchToken,timeoutSeconds}}`. Atomically consumes a queued job, never redelivered.
 - `POST /agent/jobs/:id/start`: `{dispatchToken}` -> `{mayExecute:true}` only for first valid start. Subsequent starts -> `{mayExecute:false}`. Must receive true before executing.
 - `PUT /agent/jobs/:id/output/:sequence`: `{stream:"stdout"|"stderr"|"system",text}`. Contiguous sequence integer starting at 0 across all streams, max 65536 UTF-8 bytes per chunk. Exact duplicate succeeds, mismatched duplicate/gap rejected. Preserve all accepted output. Agent retries upload, never execution.
+- `POST /agent/retire` `{}`: the endpoint revokes its own credential (used by the uninstaller); queued jobs are cancelled.
 - `POST /agent/jobs/:id/complete`: `{status:"succeeded"|"failed"|"interrupted",exitCode,summary}`. Idempotent matching completion; conflicting completion rejected.
 
 Inventory `{hostname,osName,osVersion,architecture,domain,domainJoined,ipv4:[],loggedOnUser,bootTime,cpuPercent,memoryTotalBytes,memoryUsedBytes,agentVersion,disks:[{name,label,totalBytes,freeBytes}],software:[{name,version,publisher,installDate}]}`. Metrics may be null when unavailable. `bootId` is Windows last boot UTC timestamp.
@@ -35,6 +37,7 @@ Accounts: `auth/me` and login return `{id,username,email,role,disabled}` in `use
 - `GET /health`, `GET /auth/me`, `POST /auth/login {username,password}`, `POST /auth/logout`.
 - `GET /overview` -> totals/stats; `GET /endpoints` -> array; `GET /endpoints/:id` -> endpoint incl inventory; `PATCH /endpoints/:id {displayName,tags}`; `POST /endpoints/:id/revoke`.
 - `POST /enrollment-tokens {label,maxUses,expiresInHours}` -> token shown once. `GET /enrollment-tokens` lists metadata.
+- `GET /join-requests` -> pending first, then decisions from the last 30 days: `[{id,deviceId,hostname,details:{osName,osVersion,domain,agentVersion},remoteIp,status,endpointId,createdAt,lastPollAt,decidedBy,decidedAt}]`. Operators/admins: `POST /join-requests/:id/approve`, `POST /join-requests/:id/deny` (409 once the computer has joined — revoke the endpoint instead), `DELETE /join-requests/:id` (forget a denied/pending request so the device can ask again). All audited (`agent.join.*`).
 - `GET /jobs?endpointId=` -> array; `POST /jobs {endpointIds:[],kind,payload,timeoutSeconds?,idempotencyKey?}` -> `{jobs:[]}`; `GET /jobs/:id`; `GET /jobs/:id/output?after=-1&limit=200` -> `{chunks:[{sequence,stream,text}],nextCursor,hasMore}`; `GET /jobs/:id/download` text attachment. `POST /jobs/:id/cancel` only queued jobs can cancel.
 - `GET /scripts` array; `POST /scripts {name,description,body}`; `PUT /scripts/:id {name,description,body}`; `DELETE /scripts/:id`.
 - `GET /schedules` array; `POST /schedules {name,scriptId,endpointIds,intervalMinutes,startsAt?,enabled}`; `PATCH /schedules/:id {enabled}`; `DELETE /schedules/:id`. No catch-up replay after downtime, occurrence unique in server ledger.

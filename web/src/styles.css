@@ -3599,3 +3599,14 @@ td:last-child {
 .agent-package-integrity { font-size: 11px; color: #647e82; margin-top: 15px; }
 .agent-package-integrity summary { cursor: pointer; margin-bottom: 9px; }
 .agent-package-integrity > code { display: block; overflow-wrap: anywhere; margin-bottom: 10px; }
+/* Join requests (tokenless enrollment approval) */
+.join-requests { margin-bottom: 24px; }
+.join-requests h2 { display:flex;align-items:center;gap:8px; }
+.join-count { display:inline-flex;background:#c9772c;color:#fff; }
+.join-machine { display:flex;flex-direction:column;gap:2px; }
+.join-machine small { color:#6b7a78;font-size:11px; }
+.join-actions { display:flex;gap:8px;justify-content:flex-end;white-space:nowrap; }
+.join-empty { display:flex;align-items:center;gap:12px;padding:6px 23px 22px;color:#6b7a78; }
+.join-history { padding:0 23px 18px; }
+.join-history summary { cursor:pointer;font-size:12px;color:#31665a;padding:8px 0; }
+@media (max-width: 720px) { .join-actions { flex-direction:column;align-items:stretch; } }

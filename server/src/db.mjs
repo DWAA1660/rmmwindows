@@ -30,6 +30,13 @@ export function openDatabase(filename) {
     if (!userColumns.has('disabled')) db.exec('ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0');
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase ON users(lower(username)); PRAGMA user_version=2;');
   });
+  // Additive v3: tokenless "request to join" enrollment. Only the hash of each device's
+  // join secret is stored; an agent credential is issued only after operator approval.
+  db.exec(`CREATE TABLE IF NOT EXISTS join_requests (id TEXT PRIMARY KEY, device_id TEXT UNIQUE NOT NULL, secret_hash TEXT NOT NULL,
+      hostname TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}', remote_ip TEXT, status TEXT NOT NULL, endpoint_id TEXT,
+      created_at TEXT NOT NULL, last_poll_at TEXT NOT NULL, decided_by TEXT, decided_at TEXT);
+    CREATE INDEX IF NOT EXISTS join_requests_status ON join_requests(status, created_at);
+    PRAGMA user_version=3;`);
   return db;
 }
 

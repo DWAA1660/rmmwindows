@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
+import { mountJoinRequests } from './join-requests.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -198,6 +199,7 @@ export function createApp(options = {}) {
     });
     res.status(201).json(result);
   });
+  const mountJoinConsole = mountJoinRequests(app, { db, audit, fail, str });
   const agentRouter = express.Router();
   agentRouter.use(agent);
   agentRouter.post('/checkin', (req, res) => {
@@ -275,6 +277,16 @@ export function createApp(options = {}) {
       if (job.status !== 'running' && !(job.status === 'dispatched' && status === 'interrupted')) fail(409, 'Job cannot complete in its current state.');
       db.prepare('UPDATE jobs SET status=?,exit_code=?,summary=?,completed_at=? WHERE id=?').run(status, exitCode, summary, nowIso(), job.id);
       audit(`agent:${req.endpoint.id}`, `job.${status}`, job.id, { exitCode });
+    });
+    res.json({ ok: true });
+  });
+  // Called by the endpoint's uninstaller: the endpoint gives up its own credential. Queued jobs
+  // are cancelled (never dispatched); jobs already dispatched keep their recorded state.
+  agentRouter.post('/retire', (req, res) => {
+    transaction(db, () => {
+      db.prepare('UPDATE endpoints SET revoked=1 WHERE id=?').run(req.endpoint.id);
+      db.prepare("UPDATE jobs SET status='cancelled',completed_at=?,summary='Agent was uninstalled before dispatch' WHERE endpoint_id=? AND status='queued'").run(nowIso(), req.endpoint.id);
+      audit(`agent:${req.endpoint.id}`, 'endpoint.retired.uninstalled', req.endpoint.id);
     });
     res.json({ ok: true });
   });
@@ -455,6 +467,7 @@ export function createApp(options = {}) {
     audit(req.operator.username, 'application.update.requested');
     const result = await updateRequest('POST', '/update'); res.status(202).json(result);
   });
+  mountJoinConsole(admin);
   app.use('/api', admin);
   app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found.' }));
   const webPath = options.webPath || resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist');

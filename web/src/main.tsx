@@ -45,6 +45,7 @@ import {
 import "./styles.css";
 import { AccountSettings, type AccountUser } from './AccountSettings';
 import { progressOutput } from './progress';
+import { JoinRequests, type JoinRequest } from './JoinRequests';
 
 type Disk = {
   name: string;
@@ -482,7 +483,8 @@ function App() {
     [updateStatus, setUpdateStatus] = useState<Record<string, unknown> | null>(
       null,
     ),
-    [tokens, setTokens] = useState<Record<string, unknown>[]>([]);
+    [tokens, setTokens] = useState<Record<string, unknown>[]>([]),
+    [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
   const [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
@@ -548,6 +550,8 @@ function App() {
       setJobs(js);
       setScripts(ss);
       setSchedules(sc);
+      // Polled with everything else so the "Add endpoints" badge shows waiting computers.
+      api<JoinRequest[]>("/join-requests").then(setJoinRequests).catch(() => {});
       setLastRefresh(new Date().toISOString());
     } catch (err) {
       fail(err);
@@ -910,6 +914,11 @@ function App() {
           >
             <Plus size={18} />
             <span>Add endpoints</span>
+            {joinRequests.some((row) => row.status === "pending") && (
+              <span className="nav-count" title="Computers waiting for approval">
+                {joinRequests.filter((row) => row.status === "pending").length}
+              </span>
+            )}
           </button>
           <button
             className={`nav-item ${view === "audit" ? "active" : ""}`}
@@ -1778,20 +1787,20 @@ function App() {
               <div className="enrollment-steps">
                 <section className="panel step-card">
                   <span className="step-number">01</span>
-                  <ShieldCheck size={24} />
-                  <h2>Create a token</h2>
+                  <Download size={24} />
+                  <h2>Install the agent</h2>
                   <p>
-                    Make a limited-use enrollment token. Choose its lifetime and
-                    how many computers can join.
+                    Run the PowerShell install command below as administrator.
+                    No token is needed.
                   </p>
                 </section>
                 <section className="panel step-card">
                   <span className="step-number">02</span>
-                  <Download size={24} />
-                  <h2>Install the agent</h2>
+                  <ShieldCheck size={24} />
+                  <h2>Approve it</h2>
                   <p>
-                    Run the PowerShell install command below as administrator,
-                    then enter your token when prompted.
+                    The computer appears under Waiting for approval. Approve it
+                    if you recognize it, or deny it.
                   </p>
                 </section>
                 <section className="panel step-card">
@@ -1804,14 +1813,21 @@ function App() {
                   </p>
                 </section>
               </div>
+              <JoinRequests
+                requests={joinRequests}
+                request={api}
+                canDecide={user.role !== "viewer"}
+                onChanged={() => void refresh()}
+              />
               <AgentInstaller />
               <section className="panel">
                 <div className="panel-heading">
                   <div>
-                    <h2>Enrollment tokens</h2>
+                    <h2>Enrollment tokens (optional)</h2>
                     <p>
-                      Secret values are shown once. Agent credentials stay
-                      separate.
+                      Only needed to skip approval, for example in unattended
+                      deployments: run the installer with -PromptForToken or
+                      -EnrollmentToken. Secret values are shown once.
                     </p>
                   </div>
                   <button
@@ -1858,16 +1874,16 @@ function App() {
                 ) : (
                   <Empty
                     icon={ShieldCheck}
-                    title="Ready for your first connection"
-                    description="Create an enrollment token to authorize Windows agent installations."
+                    title="No enrollment tokens"
+                    description="Tokens are optional. New computers can simply request to join and be approved above."
                   />
                 )}
               </section>
               <div className="info-note">
                 <Download size={18} />
                 <p>
-                  Downloads come directly from this server. Enrollment tokens
-                  are entered securely on the endpoint and never included in download URLs.
+                  Downloads come directly from this server. New computers hold only
+                  a private join secret until you approve them; nothing secret is in download URLs.
                   Action1 software deployment integration will be added later.
                   Server URL: <code>{window.location.origin}</code>
                 </p>
@@ -3381,7 +3397,7 @@ function AgentInstaller() {
       </div>
       <div className="agent-command-heading"><strong>Or copy and run this command</strong><button className="button small secondary" disabled={!manifest} onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError("Clipboard unavailable. Select and copy the command below."); } }}>{copied ? <Check size={14}/> : <Copy size={14}/>} {copied ? "Copied" : "Copy command"}</button></div>
       <pre className="agent-install-command"><code>{command}</code></pre>
-      <p className="muted">The script verifies the package checksum, then prompts for your enrollment token. Re-running it updates an existing agent while preserving its identity. No reboot is required.</p>
+      <p className="muted">The script verifies the package checksum and installs the agent, which then waits for your approval under Waiting for approval above. Re-running it updates an existing agent while preserving its identity. No reboot is required.</p>
       {manifest && <details className="agent-package-integrity"><summary>Package SHA256</summary><code>{manifest.sha256}</code><a className="text-button" href="/downloads/library-rmm-agent-win-x64.zip.sha256" download>Download checksum</a></details>}
       {manifest && error && <p role="alert" className="danger-text">{error}</p>}
     </div>

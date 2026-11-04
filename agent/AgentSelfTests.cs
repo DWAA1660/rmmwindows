@@ -26,7 +26,8 @@ internal static class AgentSelfTests
             ("PowerShell timeout terminates command and reports interruption", PowerShellTimeoutAsync),
             ("unsafe storage paths are rejected", StoragePathAsync),
             ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
-            ("updater stages only verified packages and never loops", UpdaterStagingAsync)
+            ("updater stages only verified packages and never loops", UpdaterStagingAsync),
+            ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync)
         };
         var failed = 0;
         foreach (var test in tests)
@@ -373,6 +374,54 @@ internal static class AgentSelfTests
             }
         }
         finally { Directory.Delete(directory, true); }
+    }
+
+    private static async Task JoinApprovalAsync()
+    {
+        var directory = CreateTemp();
+        try
+        {
+            var deviceId = Guid.NewGuid().ToString();
+            var secret = new string('s', 43);
+            var endpointId = Guid.NewGuid().ToString();
+            File.WriteAllText(Path.Combine(directory, "agent.json"), JsonSerializer.Serialize(new
+            {
+                serverUrl = "https://example.test", deviceId, joinSecret = secret, pollSeconds = 10, inventoryMinutes = 15, allowInsecureLocalhost = false
+            }));
+            var configuration = AgentConfiguration.Load(["--data-dir", directory]);
+            Assert(configuration.AwaitingApproval, "Tokenless configuration did not load as awaiting approval.");
+            var unauthorized = false;
+            try { using var api = new AgentApi(configuration, new RecordingHandler()); await api.CheckInAsync(new { }, CancellationToken.None); }
+            catch (InvalidOperationException) { unauthorized = true; }
+            Assert(unauthorized, "An unapproved agent attempted an authenticated API call.");
+
+            var responses = new Queue<object>([new { status = "pending" }, new { status = "denied" }, new { status = "approved", endpointId, agentToken = "issued-token" }]);
+            var handler = new JoinHandler(responses);
+            var waits = new List<TimeSpan>();
+            await AgentJoin.WaitForApprovalAsync(configuration, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, CancellationToken.None,
+                handler, (wait, _) => { waits.Add(wait); return Task.CompletedTask; });
+            Assert(handler.Bodies.Count == 3 && handler.Bodies.All(body => body.Contains(secret, StringComparison.Ordinal) && body.Contains(deviceId, StringComparison.Ordinal)), "Join requests did not carry the device identity.");
+            Assert(!handler.SawAuthorization, "Join requests must not send a bearer credential.");
+            Assert(waits.SequenceEqual([AgentJoin.PendingInterval, AgentJoin.DeniedInterval]), "Unexpected join polling intervals.");
+            Assert(configuration.AgentToken == "issued-token" && configuration.EndpointId == endpointId && !configuration.AwaitingApproval, "Approved credential was not applied.");
+            var reloaded = AgentConfiguration.Load(["--data-dir", directory]);
+            Assert(reloaded.AgentToken == "issued-token" && reloaded.EndpointId == endpointId && reloaded.JoinSecret == secret && reloaded.DeviceId == deviceId,
+                "Approved credential was not persisted with the existing identity.");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private sealed class JoinHandler(Queue<object> responses) : HttpMessageHandler
+    {
+        public List<string> Bodies { get; } = [];
+        public bool SawAuthorization { get; private set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath != "/api/agent/join" || request.RequestUri.Host != "example.test") return new HttpResponseMessage(HttpStatusCode.NotFound);
+            SawAuthorization |= request.Headers.Authorization is not null;
+            Bodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(responses.Dequeue()) };
+        }
     }
 
     private sealed class PackageHandler(byte[] package, AgentPackageManifest manifest) : HttpMessageHandler

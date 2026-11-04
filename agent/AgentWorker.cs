@@ -19,6 +19,12 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
             logger.LogWarning("Update helper did not restart the service within 10 minutes; continuing with installed agent {Version}.", AgentVersion.Value);
         }
+        // Tokenless installs wait here until an operator approves them in the console.
+        if (configuration.AwaitingApproval)
+        {
+            try { await AgentJoin.WaitForApprovalAsync(configuration, logger, stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+        }
         await spool.RecoverInterruptedAsync();
         var heartbeat = HeartbeatLoopAsync(stoppingToken);
         var uploads = UploadLoopAsync(stoppingToken);
