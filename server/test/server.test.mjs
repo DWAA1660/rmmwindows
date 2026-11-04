@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/app.mjs';
+import { listen } from './listen.mjs';
 
 const TEST_PASSWORD = 'not-a-production-password-for-tests';
 async function fixture(t, databasePath = ':memory:') {
   const service = createApp({ databasePath, env: { ADMIN_USERNAME: 'librarian', ADMIN_PASSWORD: TEST_PASSWORD } });
-  const server = service.app.listen(49152 + Math.floor(Math.random() * 16384), '127.0.0.1');
-  await new Promise(resolve => server.once('listening', resolve));
+  const server = await listen(service.app);
   const base = `http://127.0.0.1:${server.address().port}`;
   let cookie = ''; let csrf = '';
   const stop = async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); service.close(); };

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../src/app.mjs';
+import { listen } from './listen.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from '../src/db.mjs';
 import { mkdtempSync,rmSync } from 'node:fs';
@@ -10,8 +11,7 @@ import { join } from 'node:path';
 test('account lifecycle enforces roles, reauthentication, last admin and session revocation', async t => {
   const password='isolated-admin-password';
   const service=createApp({databasePath:':memory:',env:{ADMIN_USERNAME:'admin',ADMIN_PASSWORD:password}});
-  const server=service.app.listen(51000+Math.floor(Math.random()*10000),'127.0.0.1');
-  await new Promise(resolve=>server.once('listening',resolve));
+  const server=await listen(service.app);
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));service.close();});
   const base=`http://127.0.0.1:${server.address().port}/api`;
   const req=async(path,method='GET',body,session)=>{

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createApp } from '../src/app.mjs';
+import { listen } from './listen.mjs';
 
 test('public installer downloads expose only a checksum-verified package, never enrollment access', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'rmm-download-test-'));
@@ -15,8 +16,7 @@ test('public installer downloads expose only a checksum-verified package, never 
   const service = createApp({ databasePath: ':memory:', downloadDirectory: directory, env: {
     ADMIN_USERNAME: 'download-test', ADMIN_PASSWORD: 'isolated-test-password', PUBLIC_ORIGIN: 'https://rmm.parkcountylibrary.org'
   } });
-  const server = service.app.listen(49152 + Math.floor(Math.random() * 16000), '127.0.0.1');
-  await new Promise(resolve => server.once('listening', resolve));
+  const server = await listen(service.app);
   t.after(async () => {
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); service.close();
     assert.ok(directory.startsWith(join(tmpdir(), 'rmm-download-test-')));
