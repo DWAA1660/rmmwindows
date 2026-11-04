@@ -269,7 +269,7 @@ internal static class ConsoleRelayTests
                 }, 8, CancellationToken.None);
                 Assert(result.Interrupted && result.InterruptionReason?.Contains("timed out", StringComparison.Ordinal) == true, "The job did not time out.");
             }
-            finally { Directory.Delete(directory, true); }
+            finally { DeleteWithRetry(directory); }
             Assert(seen.Task.IsCompleted, "The relayed child never reported its PID (no live output): " + JsonSerializer.Serialize(output.ToString()));
             Assert(names.Any(name => name.StartsWith("conhost", StringComparison.OrdinalIgnoreCase) || name.StartsWith("OpenConsole", StringComparison.OrdinalIgnoreCase)),
                 "The pseudo console host was not a child of the relay: " + string.Join(", ", names));
@@ -357,7 +357,7 @@ internal static class ConsoleRelayTests
             }, timeoutSeconds, CancellationToken.None);
             return new JobRun(result, stdout.ToString(), stderr.ToString(), first, clock.Elapsed);
         }
-        finally { Directory.Delete(directory, true); }
+        finally { DeleteWithRetry(directory); }
     }
 
     /// <summary>The agent executable as PowerShell arguments ('exe', or 'dotnet.exe' 'LibraryRmm.Agent.dll' in development).</summary>
@@ -376,6 +376,16 @@ internal static class ConsoleRelayTests
         var path = Path.Combine(Path.GetTempPath(), "library-rmm-tests-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    // Killed processes can hold their working folder for a moment after exit (seen on CI runners).
+    private static void DeleteWithRetry(string directory)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { if (Directory.Exists(directory)) Directory.Delete(directory, true); return; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException && attempt < 40) { Thread.Sleep(250); }
+        }
     }
 
     private static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
