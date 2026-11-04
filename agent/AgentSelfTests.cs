@@ -31,7 +31,15 @@ internal static class AgentSelfTests
             ("file explorer lists, copies, moves, renames and creates folders (temp only)", FileOperationsBasicAsync),
             ("file explorer recursive delete removes links without following them", FileOperationsLinkDeleteAsync),
             ("file explorer refuses protected, unsafe and secret paths", FileOperationsSafetyAsync),
-            ("file explorer download sends exact bytes in chunks with SHA-256", FileOperationsDownloadAsync)
+            ("file explorer download sends exact bytes in chunks with SHA-256", FileOperationsDownloadAsync),
+            ("VT screen updates convert to plain text with CR progress", ConsoleRelayTests.ConverterAsync),
+            ("relay command line round-trips arguments and searches PATH only", ConsoleRelayTests.CommandLineQuotingAsync),
+            ("pipe-buffering child run directly shows progress only at exit", ConsoleRelayTests.DirectBufferedProgressAsync),
+            ("Invoke-LiveConsole streams buffered progress live and keeps the exit code", ConsoleRelayTests.RelayLiveProgressAsync),
+            ("relayed program is killed with the job on timeout (no orphans)", ConsoleRelayTests.RelayTimeoutKillsTreeAsync),
+            ("Unicode and wide-character progress survive the relay", ConsoleRelayTests.RelayUnicodeAsync),
+            ("relay passes arguments untouched and reports missing programs", ConsoleRelayTests.RelayArgumentsAsync),
+            ("relay keeps long scrolling output and wide lines complete", ConsoleRelayTests.RelayLongOutputAsync)
         };
         var failed = 0;
         foreach (var test in tests)
