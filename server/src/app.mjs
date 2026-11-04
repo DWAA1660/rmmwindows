@@ -75,6 +75,8 @@ export function createApp(options = {}) {
   const env = options.env || process.env;
   const db = options.db || openDatabase(options.databasePath || env.DATABASE_PATH || resolve('data/rmm.db'));
   const publicOrigin = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).origin : null;
+  // Full inventory interval pushed to agents on every heartbeat (1-1440 minutes, default 5).
+  const inventoryMinutes = Math.min(1440, Math.max(1, Number.parseInt(env.INVENTORY_MINUTES || '5', 10) || 5));
   const secureCookie = env.COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://');
   const username = env.ADMIN_USERNAME;
   if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
@@ -212,7 +214,8 @@ export function createApp(options = {}) {
       const hostname = inventory.hostname;
       db.prepare('UPDATE endpoints SET last_seen=?,boot_id=?,inventory=?,hostname=? WHERE id=?').run(now, bootId, JSON.stringify(inventory), hostname, req.endpoint.id);
     } else db.prepare('UPDATE endpoints SET last_seen=?,boot_id=? WHERE id=?').run(now, bootId, req.endpoint.id);
-    res.json({ endpointId: req.endpoint.id, serverTime: now });
+    // inventoryMinutes lets the server keep every agent's inventory fresh (agents 0.1.3+).
+    res.json({ endpointId: req.endpoint.id, serverTime: now, inventoryMinutes });
   });
   agentRouter.post('/jobs/claim', (req, res) => {
     const result = transaction(db, () => {

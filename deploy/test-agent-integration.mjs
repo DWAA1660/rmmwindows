@@ -87,6 +87,13 @@ try {
   const enrolled = { endpointId: persisted.endpointId, agentToken: persisted.agentToken };
   assert.equal((await api('/join-requests')).find(row => row.deviceId === deviceId).endpointId, enrolled.endpointId);
   assert.equal(persisted.deviceId, deviceId, 'Approval must keep the device identity.');
+  // Heartbeat + full inventory through the real PowerShell wrapper must reach the console.
+  const inventoried = await waitFor('first inventory', async () => {
+    const row = await api(`/endpoints/${enrolled.endpointId}`);
+    return row.online && row.inventory?.agentVersion ? row : null;
+  });
+  assert.ok(inventoried.inventory.osName && Array.isArray(inventoried.inventory.software), 'Inventory must include OS and software.');
+  phase(`Inventory received (agent ${inventoried.inventory.agentVersion}, ${inventoried.inventory.software.length} software entries).`);
   const expected = 'RMM✓🙂'.repeat(30000);
   const request = await api('/jobs', { method: 'POST', body: { endpointIds: [enrolled.endpointId],
     kind: 'powershell', payload: { script: "[Console]::Out.Write(('RMM✓🙂' * 30000)); [Console]::Error.Write('stderr-complete')" },

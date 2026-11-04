@@ -78,6 +78,7 @@ test('inventory preserves unavailable metrics and rejects malformed collection s
   const agent = { method: 'POST', token: endpoint.agentToken, auth: false };
   const good = await f.request('/agent/checkin', { ...agent, body: { bootId: 'boot-1', inventory: { hostname: 'LIBRARY-PC', cpuPercent: null, memoryUsedBytes: null, domainJoined: null, ipv4: ['192.168.10.7'], disks: [{ name: 'C:', label: 'System', totalBytes: 1000000, freeBytes: 1000 }], software: [{ name: 'Reader', version: '1.0' }] } } });
   assert.equal(good.status, 200);
+  assert.equal(good.data.inventoryMinutes, 5, 'server tells agents to refresh inventory every 5 minutes by default');
   const inventory = (await f.request(`/endpoints/${endpoint.endpointId}`)).data.inventory;
   assert.equal(inventory.cpuPercent, null); assert.equal(inventory.memoryUsedBytes, null); assert.equal(inventory.domainJoined, null);
   assert.equal(inventory.software[0].publisher, '');

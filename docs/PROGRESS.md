@@ -86,6 +86,7 @@
 - Run PowerShell on many computers: a "Run PowerShell" button on Overview/Endpoints and the run dialog now has a checkbox picker (filter, select all online, select shown). Running on more than one computer opens a live results board (`web/src/BatchResults.tsx`): one card per computer with status, progress bar and the latest output, plus "Full output". Server already created one at-most-once job per endpoint.
 - Action1 / SYSTEM deployment: the copied command sets TLS 1.2, hides the progress bar, and throws on a non-zero installer exit. `Bootstrap-Agent.ps1` relaunches itself in 64-bit PowerShell under WOW64 and logs the account it runs as. Verified: started from 32-bit PowerShell with -DownloadOnly against production, it relaunched to 64-bit, verified and extracted 0.1.2, exit 0; a bad server URL exits 1. Not run as SYSTEM here (no elevation); SYSTEM needs no prompts in the default flow.
 - Speed: agent uploads output every 0.5 s (was 2 s); the output window polls every 1 s (was 2.5 s).
+- Inventory auto-refresh: the server returns `inventoryMinutes` (env `INVENTORY_MINUTES`, default 5) in every checkin response and agents (0.1.3+) adopt it, so the console's disks/software/IP/logged-on user refresh every 5 minutes without editing each agent.json. A failed inventory no longer blocks heartbeats (the endpoint used to look offline); it is retried after 5 minutes. The real-agent integration test now also waits for the first inventory through the real PowerShell wrapper (passed: 96 software entries).
 
 ## 2026-11-04 — Uninstall from Control Panel
 

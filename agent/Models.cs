@@ -85,7 +85,7 @@ public sealed class AgentApi : IDisposable
         if (!response.IsSuccessStatusCode) throw new AgentApiException((int)response.StatusCode);
         return await response.Content.ReadFromJsonAsync<T>(AgentConfiguration.Json, cancellationToken);
     }
-    public Task CheckInAsync(object body, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, "checkin", body, ct);
+    public async Task<JsonElement> CheckInAsync(object body, CancellationToken ct) => await SendAsync<JsonElement>(HttpMethod.Post, "checkin", body, ct);
     public async Task<AgentJob?> ClaimAsync(CancellationToken ct) => (await SendAsync<ClaimResponse>(HttpMethod.Post, "jobs/claim", new { }, ct))?.Job;
     public Task<StartResponse?> StartAsync(AgentJob job, CancellationToken ct) => SendAsync<StartResponse>(HttpMethod.Post, $"jobs/{Guid.Parse(job.Id):D}/start", new { job.DispatchToken }, ct);
     public Task UploadAsync(string id, OutputChunk chunk, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Put, $"jobs/{Guid.Parse(id):D}/output/{chunk.Sequence}", new { chunk.Stream, chunk.Text }, ct);

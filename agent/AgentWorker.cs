@@ -58,21 +58,44 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
     {
         var nextInventory = DateTimeOffset.MinValue;
         var bootId = "unknown";
+        // The server sets the inventory interval for every agent (checkin response
+        // "inventoryMinutes") so the console stays current without editing each agent.json.
+        var inventoryMinutes = configuration.InventoryMinutes;
         while (!ct.IsCancellationRequested)
         {
             try
             {
+                JsonElement? snapshot = null;
                 if (DateTimeOffset.UtcNow >= nextInventory)
                 {
-                    var snapshot = await inventory.CollectAsync(force: true, ct);
-                    bootId = InventoryCollector.BootId(snapshot);
-                    await api.CheckInAsync(new { bootId, inventory = snapshot }, ct);
-                    nextInventory = DateTimeOffset.UtcNow.AddMinutes(configuration.InventoryMinutes);
+                    try
+                    {
+                        snapshot = await inventory.CollectAsync(force: true, ct);
+                        bootId = InventoryCollector.BootId(snapshot.Value);
+                        nextInventory = DateTimeOffset.UtcNow.AddMinutes(inventoryMinutes);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception exception)
+                    {
+                        // An inventory failure must never stop heartbeats (the endpoint would look offline).
+                        logger.LogWarning("Inventory collection failed ({FailureType}); heartbeat continues, inventory retried in 5 minutes.", exception.GetType().Name);
+                        nextInventory = DateTimeOffset.UtcNow.AddMinutes(Math.Min(5, inventoryMinutes));
+                    }
                 }
-                else await api.CheckInAsync(new { bootId }, ct);
+                var response = snapshot.HasValue
+                    ? await api.CheckInAsync(new { bootId, inventory = snapshot.Value }, ct)
+                    : await api.CheckInAsync(new { bootId }, ct);
+                if (response.ValueKind == JsonValueKind.Object && response.TryGetProperty("inventoryMinutes", out var minutes) &&
+                    minutes.TryGetInt32(out var serverMinutes) && serverMinutes is >= 1 and <= 1440 && serverMinutes != inventoryMinutes)
+                {
+                    // A shorter interval applies immediately; a longer one after the next collection.
+                    var sooner = DateTimeOffset.UtcNow.AddMinutes(serverMinutes);
+                    if (serverMinutes < inventoryMinutes && sooner < nextInventory) nextInventory = sooner;
+                    inventoryMinutes = serverMinutes;
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception exception) { logger.LogWarning("Heartbeat/inventory failed ({FailureType}); enrollment identity retained.", exception.GetType().Name); }
+            catch (Exception exception) { logger.LogWarning("Heartbeat failed ({FailureType}); enrollment identity retained.", exception.GetType().Name); }
             await Task.Delay(TimeSpan.FromSeconds(30), ct);
         }
     }
