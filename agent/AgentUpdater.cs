@@ -36,12 +36,15 @@ internal sealed class AgentUpdater : IDisposable
     internal const int MaxAttemptsPerPackage = 3;
     private const long MaxPackageBytes = 256L * 1024 * 1024;
     private const long MaxExtractedBytes = 1024L * 1024 * 1024;
-    private static readonly Regex PlainVersion = new(@"^\d{1,6}\.\d{1,6}\.\d{1,6}$", RegexOptions.CultureInvariant);
+    private static readonly Regex PlainVersion = new(@"^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$", RegexOptions.CultureInvariant);
     private static readonly Regex Sha256Hex = new("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
     private readonly AgentConfiguration configuration;
     private readonly HttpClient client;
     private readonly ILogger logger;
     private readonly Func<DateTimeOffset> clock;
+    private string activeStage = "manifest";
+    private AgentPackageManifest? activeManifest;
+    private UpdateAttemptState? activeState;
 
     public AgentUpdater(AgentConfiguration configuration, ILogger logger, HttpMessageHandler? handler = null, Func<DateTimeOffset>? clock = null)
     {
@@ -64,6 +67,7 @@ internal sealed class AgentUpdater : IDisposable
     {
         if (!configuration.AutoUpdate)
         {
+            ReportSafely(configuration,"disabled","policy","disabled");
             logger.LogInformation("Automatic agent updates are disabled in agent.json.");
             return false;
         }
@@ -72,13 +76,15 @@ internal sealed class AgentUpdater : IDisposable
             var installDirectory = InstalledDirectory();
             if (installDirectory is null)
             {
+                ReportSafely(configuration,"unsupported","policy","unsupported_install");
                 logger.LogInformation("Agent is not running from a LibraryRmm install directory; startup update skipped.");
                 return false;
             }
             using var updater = new AgentUpdater(configuration, logger);
             var staged = await updater.PrepareAsync(AgentVersion.Value, ct);
             if (staged is null) return false;
-            updater.Launch(staged, installDirectory);
+            try { updater.Report("installing","launch"); updater.Launch(staged, installDirectory); }
+            catch { updater.Report("failed","launch","launch_failed"); throw; }
             logger.LogInformation("Verified agent {Version} staged; update helper launched. No jobs will be claimed until restart.", staged.Version);
             return true;
         }
@@ -101,27 +107,38 @@ internal sealed class AgentUpdater : IDisposable
 
     internal async Task<StagedUpdate?> PrepareAsync(string currentVersion, CancellationToken ct)
     {
+        try
+        {
+        activeStage="manifest"; Report("checking","manifest");
         // At boot the service can start before DHCP/DNS/proxy/TLS connectivity is ready.
         // Retry only metadata reads, before recording an install attempt or claiming jobs.
         var manifest = await FetchManifestWithRetryAsync(() => FetchManifestAsync(ct), logger, ct);
-        if (!IsNewer(manifest.Version, currentVersion)) return null;
+        activeManifest=manifest;
+        if (!IsNewer(manifest.Version, currentVersion)) { Report("current","complete"); return null; }
         EnsureSafeDirectory(UpdatesDirectory);
+        activeStage="policy";
         var state = ReadState();
+        activeState=state;
         if (!MayAttempt(state, manifest, clock()))
         {
+            Report("retry_wait","policy",state?.Attempts>=MaxAttemptsPerPackage?"attempt_limit":"retry_backoff",
+                state is not null && state.Attempts<MaxAttemptsPerPackage ? state.LastAttemptUtc.AddMinutes(30*Math.Pow(4,Math.Max(0,state.Attempts-1))) : null);
             logger.LogInformation("Agent {Version} is available but update attempts are paused after {Attempts} attempt(s).",
                 manifest.Version, state?.Attempts ?? 0);
             return null;
         }
         var samePackage = state is not null && state.Version == manifest.Version && state.Sha256 == manifest.Sha256;
         // Persist the attempt FIRST so a crash, bad package or failed install cannot loop.
-        WriteState(new UpdateAttemptState(manifest.Version, manifest.Sha256, samePackage ? state!.Attempts + 1 : 1, clock()));
+        activeState=new UpdateAttemptState(manifest.Version, manifest.Sha256, samePackage ? state!.Attempts + 1 : 1, clock());
+        WriteState(activeState);
         RemoveStaleStaging(keep: null);
         var archive = Path.Combine(UpdatesDirectory, manifest.Sha256 + ".zip");
         var destination = Path.Combine(UpdatesDirectory, $"{manifest.Version}-{manifest.Sha256[..12]}");
         try
         {
+            activeStage="download";Report("downloading","download");
             await DownloadAsync(manifest, archive, ct);
+            activeStage="extract";Report("verifying","extract");
             ExtractVerified(archive, destination, manifest.Version);
         }
         catch
@@ -131,6 +148,37 @@ internal sealed class AgentUpdater : IDisposable
         }
         finally { TryDeleteFile(archive); TryDeleteFile(archive + ".partial"); }
         return new StagedUpdate(manifest.Version, destination);
+        }
+        catch(Exception exception)
+        {
+            Report("failed",activeStage,ct.IsCancellationRequested?"cancelled":ErrorCode(exception,activeStage));
+            throw;
+        }
+    }
+
+    private void Report(string phase,string stage,string? code=null,DateTimeOffset? retry=null) =>
+        ReportSafely(configuration,phase,stage,code,activeManifest?.Version,activeManifest?.Sha256,activeState,retry,clock());
+
+    private static void ReportSafely(AgentConfiguration config,string phase,string stage,string? code=null,string? version=null,
+        string? digest=null,UpdateAttemptState? state=null,DateTimeOffset? retry=null,DateTimeOffset? now=null)
+    {
+        try { UpdateDiagnostics.PublishReport(config,phase,stage,code,version,digest,state,retry,now); }
+        catch(Exception exception) when(exception is IOException or UnauthorizedAccessException) { /* Never stop installed agent solely for diagnostics I/O. */ }
+    }
+
+    internal static string ErrorCode(Exception exception,string stage)
+    {
+        if(exception is OperationCanceledException) return "request_timeout";
+        if(exception is HttpRequestException http) return http.HttpRequestError switch {
+            HttpRequestError.NameResolutionError=>"dns_error",HttpRequestError.SecureConnectionError=>"tls_error",_=>"network_error" };
+        if(exception is AgentApiException) return "http_error";
+        if(stage=="policy") return "state_invalid";
+        if(stage=="manifest" && exception is InvalidDataException or JsonException) return "manifest_invalid";
+        if(stage=="download" && exception is InvalidDataException) return "checksum_mismatch";
+        if(stage=="verify") return "checksum_mismatch";
+        if(stage=="extract") return "extract_failed";
+        if(stage=="launch") return "launch_failed";
+        return "unknown_failure";
     }
 
     internal async Task<AgentPackageManifest> FetchManifestAsync(CancellationToken ct)
@@ -170,7 +218,7 @@ internal sealed class AgentUpdater : IDisposable
     {
         if (manifest.Runtime != "win-x64") throw new InvalidDataException("Agent package runtime is not win-x64.");
         if (manifest.DownloadUrl != DownloadPath) throw new InvalidDataException("Agent package URL is not the fixed same-origin download path.");
-        if (manifest.Version is null || !Regex.IsMatch(manifest.Version, @"^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.-]+)?$")) throw new InvalidDataException("Agent package version is invalid.");
+        if (!UpdateDiagnostics.ValidVersion(manifest.Version)) throw new InvalidDataException("Agent package version is invalid.");
         if (manifest.Sha256 is null || !Sha256Hex.IsMatch(manifest.Sha256)) throw new InvalidDataException("Agent package digest is invalid.");
         if (manifest.SizeBytes is <= 0 or > MaxPackageBytes) throw new InvalidDataException("Agent package size is outside supported bounds.");
     }
@@ -194,6 +242,11 @@ internal sealed class AgentUpdater : IDisposable
 
     private async Task DownloadAsync(AgentPackageManifest manifest, string archive, CancellationToken ct)
     {
+        // ResponseHeadersRead ends HttpClient.Timeout protection at the headers. Bound the
+        // entire body transfer too, so a stalled server cannot block job pickup indefinitely.
+        using var transferDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        transferDeadline.CancelAfter(TimeSpan.FromMinutes(10));
+        ct = transferDeadline.Token;
         using var response = await client.GetAsync(DownloadPath.TrimStart('/'), HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode != HttpStatusCode.OK) throw new AgentApiException((int)response.StatusCode);
         var partial = archive + ".partial";
@@ -213,6 +266,7 @@ internal sealed class AgentUpdater : IDisposable
             }
         }
         var actual = Convert.ToHexStringLower(hash.GetHashAndReset());
+        activeStage="verify";Report("verifying","verify");
         if (total != manifest.SizeBytes || actual != manifest.Sha256) throw new InvalidDataException("Agent package SHA-256 or size does not match the manifest.");
         File.Move(partial, archive, overwrite: true);
     }
@@ -266,29 +320,53 @@ internal sealed class AgentUpdater : IDisposable
         }
     }
 
-    private void Launch(StagedUpdate staged, string installDirectory)
+    internal static string BuildHelperScript(StagedUpdate staged, string installDirectory, AgentConfiguration configuration)
     {
         static string Quote(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        var updatesDirectory=Path.Combine(configuration.DataDirectory,"updates");
         var origin = new Uri(configuration.ServerUrl).GetLeftPart(UriPartial.Authority);
-        var log = Path.Combine(UpdatesDirectory, $"update-{staged.Version}.log");
+        var log = Path.Combine(updatesDirectory, $"update-{staged.Version}.log");
         var insecure = configuration.AllowInsecureLocalhost ? " -AllowInsecureLocalhost" : "";
-        var helper = Path.Combine(staged.Directory, "apply-update.ps1");
-        File.WriteAllText(helper, $$"""
+        return $$"""
             # Generated by the Library RMM agent. Applies a verified package, then exits.
             $ErrorActionPreference = 'Stop'
-            Start-Transcript -LiteralPath {{Quote(log)}} -Append | Out-Null
+            $resultPath = {{Quote(Path.Combine(updatesDirectory,"update-result.json"))}}
+            $code = 1
+            $resultError = 'install_failed'
+            $transcriptStarted = $false
             try {
+                Start-Transcript -LiteralPath {{Quote(log)}} -Append | Out-Null
+                $transcriptStarted = $true
                 & {{Quote(Path.Combine(staged.Directory, "Install-Agent.ps1"))}} -ServerUrl {{Quote(origin)}} -InstallDirectory {{Quote(installDirectory)}} -DataDirectory {{Quote(configuration.DataDirectory)}}{{insecure}}
                 Write-Host 'Agent update to {{staged.Version}} completed.'
                 $code = 0
+                $resultError = $null
             } catch {
-                Write-Host ('Agent update failed: ' + $_.Exception.Message)
-                $service = Get-Service -Name '{{ServiceName}}' -ErrorAction SilentlyContinue
-                if ($service -and $service.Status -ne 'Running') { Start-Service -Name '{{ServiceName}}' -ErrorAction SilentlyContinue }
+                if ($_.Exception -is [System.Management.Automation.PipelineStoppedException] -or $_.Exception.InnerException -is [System.Management.Automation.PipelineStoppedException]) { $resultError = 'pipeline_stopped' }
+                Write-Host ('Agent update failed: ' + $resultError)
+                try {
+                    $service = Get-Service -Name '{{ServiceName}}' -ErrorAction SilentlyContinue
+                    if ($service -and $service.Status -ne 'Running') { Start-Service -Name '{{ServiceName}}' -ErrorAction SilentlyContinue }
+                } catch { }
                 $code = 1
-            } finally { Stop-Transcript | Out-Null }
+            } finally {
+                # Fixed structured result survives ordinary failures without exposing transcript text.
+                try {
+                    $result = @{ schemaVersion=1; version='{{staged.Version}}'; success=($code -eq 0); errorCode=$resultError; stage=$(if($code -eq 0){'complete'}else{'install'}); completedAt=[DateTimeOffset]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+                    $temporary = $resultPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                    [IO.File]::WriteAllText($temporary,$result,(New-Object Text.UTF8Encoding($false)))
+                    if([IO.File]::Exists($resultPath)) { [IO.File]::Replace($temporary,$resultPath,$null) } else { [IO.File]::Move($temporary,$resultPath) }
+                } catch { }
+                if($transcriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
+            }
             exit $code
-            """, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            """;
+    }
+
+    private void Launch(StagedUpdate staged,string installDirectory)
+    {
+        var helper=Path.Combine(staged.Directory,"apply-update.ps1");
+        File.WriteAllText(helper,BuildHelperScript(staged,installDirectory,configuration),new UTF8Encoding(encoderShouldEmitUTF8Identifier:true));
         var start = new ProcessStartInfo(PowerShellRunner.PowerShellPath)
         {
             UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
@@ -302,8 +380,12 @@ internal sealed class AgentUpdater : IDisposable
 
     internal UpdateAttemptState? ReadState()
     {
-        try { return File.Exists(StatePath) ? JsonSerializer.Deserialize<UpdateAttemptState>(File.ReadAllText(StatePath), AgentConfiguration.Json) : null; }
-        catch (JsonException) { return null; }
+        if(!File.Exists(StatePath)) return null;
+        if(new FileInfo(StatePath).Length>65536 || File.GetAttributes(StatePath).HasFlag(FileAttributes.ReparsePoint)) throw new InvalidDataException("Unsafe update attempt state.");
+        var state=JsonSerializer.Deserialize<UpdateAttemptState>(File.ReadAllText(StatePath),AgentConfiguration.Json);
+        if(state is null || !UpdateDiagnostics.ValidVersion(state.Version) || state.Sha256 is null || !Sha256Hex.IsMatch(state.Sha256) || state.Attempts is <1 or >MaxAttemptsPerPackage)
+            throw new InvalidDataException("Invalid update attempt state.");
+        return state;
     }
 
     private void WriteState(UpdateAttemptState state)

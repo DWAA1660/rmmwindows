@@ -1,5 +1,9 @@
 # Endpoint groups and diagnostics UI handoff — 2026-11-04
 
+## 2026-11-05 status checkpoint
+
+Coordinator/Claude completed parent integration and local browser QA using a real non-service agent: actual AD canonical name, DN and OU hierarchy appeared correctly. Full verification recorded in PROGRESS.md passed server42/42, agent32/32, companion checks and frontend builds; later QoL work increased frontend coverage. PR#2/PR#3 were subsequently merged and deployed to main `a055401`/agent0.1.7, per the coordinator's deployment record. Initial “pending placement/browser QA” notes below describe this component's original handoff. No production group deletion was performed by this contributor. Independent support prompt/indicator flags (including both off) and dual monitors are documented in HANDOFF-REMOTE-WEB.md; they do not alter AD inventory or RMM group membership.
+
 ## Delivered
 
 - Updated `web/src/EndpointGroups.tsx`, preserving its existing public props and behavior for group creation/edit, full-group selection, bulk jobs and membership moves. Scoped `EndpointGroups.css` adds a selected-group heading with discoverable **Edit group** / **Delete group** buttons.

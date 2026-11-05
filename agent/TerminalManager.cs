@@ -15,6 +15,7 @@ public sealed class TerminalManager(AgentConfiguration configuration, AgentApi a
     private readonly string instanceId = Guid.NewGuid().ToString("D");
     private readonly object sync = new();
     private readonly Dictionary<string, Entry> entries = [];
+    public bool HasActiveSessions { get { lock (sync) return entries.Count > 0; } }
     private readonly HashSet<string> seen = [];
     private Task? guardian;
     // A brief network problem should not destroy an operator's terminal: explicit denial ends shells

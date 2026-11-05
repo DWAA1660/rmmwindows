@@ -78,7 +78,11 @@ function Assert-LocalDirectory([string]$Path) {
 function Assert-OwnedDirectory([string]$Path, [ValidateSet('install', 'data')][string]$Role) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) { throw 'Install/data target is an existing file.' }
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
-    if (-not (Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1)) { return }
+    # Avoid stopping an upstream PowerShell pipeline with Select-Object -First.
+    # Enumeration is read-only and includes hidden ownership markers.
+    $iterator = [IO.Directory]::EnumerateFileSystemEntries($Path).GetEnumerator()
+    try { $hasEntries = $iterator.MoveNext() } finally { $iterator.Dispose() }
+    if (-not $hasEntries) { return }
     $markerPath = Join-Path $Path '.library-rmm-owned.json'
     $valid = $false
     if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
@@ -148,6 +152,7 @@ if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
 }
 Protect-Directory $InstallDirectory
 Protect-Directory $DataDirectory
+Write-Host 'Update checkpoint: installation directories validated and protected.'
 Write-OwnershipMarker $InstallDirectory 'install'
 Write-OwnershipMarker $DataDirectory 'data'
 $configPath = Join-Path $DataDirectory 'agent.json'
@@ -215,6 +220,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $targetExe = Join-Path $InstallDirectory 'LibraryRmm.Agent.exe'
 if ($existing) {
+    Write-Host 'Update checkpoint: stopping the agent service.'
     $serviceInfo = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($serviceInfo.PathName -notlike ('"' + $targetExe + '"*')) { throw 'The service name is already used at another path. Refusing to replace it.' }
     Stop-Service -Name $serviceName -Force
@@ -226,6 +232,7 @@ if ($existing) {
 Get-ChildItem -LiteralPath $BinaryDirectory -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $InstallDirectory $_.Name) -Force
 }
+Write-Host 'Update checkpoint: agent binaries copied.'
 if (Test-Path -LiteralPath $sourceCompanion -PathType Container) {
     Protect-CompanionDirectory $targetCompanion
     Get-ChildItem -LiteralPath $sourceCompanion -Force | Copy-Item -Destination $targetCompanion -Recurse -Force
@@ -264,6 +271,7 @@ if ($existing) {
 & sc.exe failure $serviceName reset= 86400 actions= restart/60000/restart/120000/restart/300000 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Unable to configure service recovery.' }
 Start-Service -Name $serviceName
+Write-Host 'Update checkpoint: agent service start requested.'
 $installedService = Get-Service -Name $serviceName
 $installedService.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
 if ($joinPending) {

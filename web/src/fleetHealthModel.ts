@@ -40,11 +40,11 @@ export function fleetHealth(endpoints: HealthEndpoint[], latestAgent?: string, n
   issues.push({ key: 'reboot', title: 'Waiting for a restart', advice: 'Updates or configuration changes finish after a restart. Schedule it when the computer is not in use.', endpoints: reboot });
   const agent = latestAgent ? active.filter(endpoint => endpoint.inventory && olderVersion(endpoint.inventory.agentVersion, latestAgent))
     .map(endpoint => ({ id: endpoint.id, name: name(endpoint), detail: `agent ${endpoint.inventory?.agentVersion ?? 'unknown'} → ${latestAgent}` })) : [];
-  issues.push({ key: 'agent', title: 'Agent update available', advice: 'Agents update themselves when their service restarts (for example after a reboot). Agents older than 0.1.1 need the install command run once.', endpoints: agent });
+  issues.push({ key: 'agent', title: 'Agent update available', advice: 'Agent 0.1.8 and later checks periodically while idle. Older agents check at service startup; use an agent-service-only restart or the installer when idle. A computer reboot is not required for an agent update. Agents older than 0.1.1 need the install command run once.', endpoints: agent });
   const uptime = active.flatMap(endpoint => {
     const seconds = endpoint.inventory?.uptimeSeconds ?? (endpoint.inventory?.bootTime ? (now - Date.parse(endpoint.inventory.bootTime)) / 1000 : null);
     return typeof seconds === 'number' && Number.isFinite(seconds) && days(seconds) >= LONG_UPTIME_DAYS ? [{ id: endpoint.id, name: name(endpoint), detail: `up ${days(seconds)} days` }] : [];
   });
-  issues.push({ key: 'uptime', title: `Not restarted in ${LONG_UPTIME_DAYS}+ days`, advice: 'Long uptimes delay updates and can slow computers down. A restart also lets the agent update itself.', endpoints: uptime });
+  issues.push({ key: 'uptime', title: `Not restarted in ${LONG_UPTIME_DAYS}+ days`, advice: 'Review long uptime alongside pending Windows restart indicators and endpoint health. Schedule any maintenance restart when the computer is not in use.', endpoints: uptime });
   return issues;
 }

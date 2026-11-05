@@ -9,6 +9,7 @@ import { mountAgentDownloads } from './downloads.mjs';
 import { mountGroups } from './groups.mjs';
 import { mountSupport } from './support.mjs';
 import { mountTerminal } from './terminals.mjs';
+import { mountUpdateHealth } from './update-health.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
@@ -161,6 +162,7 @@ export function createApp(options = {}) {
   const rawFileChunk = req => req.method === 'PUT' && /^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) && req.is('application/octet-stream');
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
   const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
+  const updateHealth = mountUpdateHealth({ db, audit, fail, str });
   const expectedOrigin = req => publicOrigin || `http://${req.headers.host}`;
   function checkOrigin(req, res, next) {
     // Browsers always send Origin for same-origin fetch mutations. Requiring it also
@@ -190,7 +192,7 @@ export function createApp(options = {}) {
     if (!endpoint) return res.status(401).json({ error: 'Invalid or revoked agent credential.' });
     req.endpoint = endpoint; next();
   }
-  const endpointView = row => row && ({ id: row.id, hostname: row.hostname, displayName: row.display_name, deviceId: row.device_id, groupId:row.group_id, groupName:db.prepare('SELECT name FROM endpoint_groups WHERE id=?').get(row.group_id)?.name || 'New endpoints', tags: parse(row.tags, []), inventory: parse(row.inventory), bootId: row.boot_id, lastSeen: row.last_seen, createdAt: row.created_at, revoked: Boolean(row.revoked), online: !row.revoked && Date.now() - Date.parse(row.last_seen) < 120000 });
+  const endpointView = row => row && ({ id: row.id, hostname: row.hostname, displayName: row.display_name, deviceId: row.device_id, groupId:row.group_id, groupName:db.prepare('SELECT name FROM endpoint_groups WHERE id=?').get(row.group_id)?.name || 'New endpoints', tags: parse(row.tags, []), inventory: parse(row.inventory), updateStatus: updateHealth.get(row.id), bootId: row.boot_id, lastSeen: row.last_seen, createdAt: row.created_at, revoked: Boolean(row.revoked), online: !row.revoked && Date.now() - Date.parse(row.last_seen) < 120000 });
   const jobView = row => row && ({ id: row.id, endpointId: row.endpoint_id, endpointName: row.endpoint_name, kind: row.kind, payload: parse(row.payload), timeoutSeconds: row.timeout_seconds, status: row.status, createdAt: row.created_at, dispatchedAt: row.dispatched_at, startedAt: row.started_at, completedAt: row.completed_at, exitCode: row.exit_code, summary: row.summary, createdBy: row.created_by });
   const getJob = id => db.prepare('SELECT j.*, e.display_name endpoint_name FROM jobs j JOIN endpoints e ON e.id=j.endpoint_id WHERE j.id=?').get(id);
   const scriptView = row => row && ({ id: row.id, name: row.name, description: row.description, body: row.body, updatedAt: row.updated_at });
@@ -270,16 +272,34 @@ export function createApp(options = {}) {
   const mountJoinConsole = mountJoinRequests(app, { db, audit, fail, str });
   const agentRouter = express.Router();
   agentRouter.use(agent);
+  // Startup updater reports before normal inventory/job processing begins. This
+  // route never rewrites inventory or boot identity and has no command authority.
+  agentRouter.post('/update-status', (req, res) => {
+    if (Object.keys(req.body).some(key => key !== 'updateStatus')) fail(400, 'Unexpected updater status request field.');
+    const report = updateHealth.canonical(req.body.updateStatus);
+    if (report === undefined) fail(400, 'updateStatus is required.');
+    const now = nowIso();
+    transaction(db, () => {
+      db.prepare('UPDATE endpoints SET last_seen=? WHERE id=?').run(now, req.endpoint.id);
+      updateHealth.record(req.endpoint.id, report, now);
+    });
+    res.json({ endpointId: req.endpoint.id, serverTime: now });
+  });
   agentRouter.post('/checkin', (req, res) => {
     const bootId = str(req.body.bootId, 'bootId', { max: 200, fallback: '' });
     const now = nowIso();
+    const report = updateHealth.canonical(req.body.updateStatus);
+    let inventory;
     if (req.body.inventory !== undefined) {
-      const inventory = canonicalInventory(req.body.inventory, req.endpoint.hostname);
+      inventory = canonicalInventory(req.body.inventory, req.endpoint.hostname);
       if (Buffer.byteLength(JSON.stringify(inventory)) > 1500000) fail(413, 'Inventory is too large.');
+    }
+    transaction(db, () => {
       // Inventory is data, never HTML or a command. UI must render fields as text.
-      const hostname = inventory.hostname;
-      db.prepare('UPDATE endpoints SET last_seen=?,boot_id=?,inventory=?,hostname=? WHERE id=?').run(now, bootId, JSON.stringify(inventory), hostname, req.endpoint.id);
-    } else db.prepare('UPDATE endpoints SET last_seen=?,boot_id=? WHERE id=?').run(now, bootId, req.endpoint.id);
+      if (inventory) db.prepare('UPDATE endpoints SET last_seen=?,boot_id=?,inventory=?,hostname=? WHERE id=?').run(now, bootId, JSON.stringify(inventory), inventory.hostname, req.endpoint.id);
+      else db.prepare('UPDATE endpoints SET last_seen=?,boot_id=? WHERE id=?').run(now, bootId, req.endpoint.id);
+      updateHealth.record(req.endpoint.id, report, now);
+    });
     // inventoryMinutes lets the server keep every agent's inventory fresh (agents 0.1.3+).
     res.json({ endpointId: req.endpoint.id, serverTime: now, inventoryMinutes });
   });
@@ -408,6 +428,7 @@ export function createApp(options = {}) {
     next();
   });
   admin.get('/endpoints', (req, res) => res.json(db.prepare('SELECT * FROM endpoints ORDER BY display_name COLLATE NOCASE').all().map(endpointView)));
+  updateHealth.mountConsole(admin);
   mountGroups(admin, {db,audit,fail,str});
   admin.get('/endpoints/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);

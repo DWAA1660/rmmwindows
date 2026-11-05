@@ -9,17 +9,19 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
     PowerShellRunner runner, InventoryCollector inventory, TerminalManager terminals, ILogger<AgentWorker> logger) : BackgroundService
 {
     internal const int ClaimWaitSeconds = 20;
+    internal static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromMinutes(15);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Startup self-update happens BEFORE recovery, heartbeats or job claims, so it can never
         // interrupt a command. Console/test runs are never updated.
-        if (WindowsServiceHelpers.IsWindowsService() &&
-            await AgentUpdater.TryBeginUpdateAsync(configuration, logger, stoppingToken))
+        var isService = WindowsServiceHelpers.IsWindowsService();
+        if (isService)
         {
-            try { await Task.Delay(TimeSpan.FromMinutes(10), stoppingToken); }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-            logger.LogWarning("Update helper did not restart the service within 10 minutes; continuing with installed agent {Version}.", AgentVersion.Value);
+            using var statusDelivery = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var delivery = UpdateStatusLoopAsync(statusDelivery.Token);
+            try { await CheckForUpdateAsync(stoppingToken); }
+            finally { statusDelivery.Cancel(); try { await delivery; } catch (OperationCanceledException) { } }
         }
         // Tokenless installs wait here until an operator approves them in the console.
         if (configuration.AwaitingApproval)
@@ -31,6 +33,7 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
         var heartbeat = HeartbeatLoopAsync(stoppingToken);
         var uploads = UploadLoopAsync(stoppingToken);
         logger.LogInformation("Library RMM agent started. Endpoint {EndpointId}; outbound management only.", configuration.EndpointId);
+        var nextUpdateCheck = DateTimeOffset.UtcNow.Add(UpdateCheckInterval);
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -41,6 +44,13 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     // Long-poll: the server answers as soon as a job is queued (or after ~20 s), so an
                     // operator's action starts within moments. 20 s stays well below the 30 s client timeout.
                     var started = DateTimeOffset.UtcNow;
+                    // The loop is sequential: only check BETWEEN commands, with no live terminal
+                    // or desktop session. Update delivery/retries never requeue a command.
+                    if (isService && DateTimeOffset.UtcNow >= nextUpdateCheck && !terminals.HasActiveSessions && !SupportLauncher.HasActiveSession)
+                    {
+                        await CheckForUpdateAsync(stoppingToken);
+                        nextUpdateCheck = DateTimeOffset.UtcNow.Add(UpdateCheckInterval);
+                    }
                     var job = await api.ClaimAsync(stoppingToken, ClaimWaitSeconds);
                     if (job is not null) await ProcessJobAsync(job, stoppingToken);
                     // A server without long-poll support answers an empty claim at once; never spin on it.
@@ -61,6 +71,27 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
         {
             terminals.Dispose();
             try { await Task.WhenAll(heartbeat, uploads); } catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        }
+    }
+
+    private async Task CheckForUpdateAsync(CancellationToken ct)
+    {
+        if (!await AgentUpdater.TryBeginUpdateAsync(configuration, logger, ct)) return;
+        try { await Task.Delay(TimeSpan.FromMinutes(10), ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+        UpdateDiagnostics.PublishReport(configuration, "failed", "install", "helper_stalled");
+        logger.LogWarning("Update helper did not restart the service within 10 minutes; installed agent continues without replaying work.");
+    }
+
+    private async Task UpdateStatusLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (!configuration.AwaitingApproval)
+                try { await api.SendAsync<JsonElement>(HttpMethod.Post, "update-status", new { updateStatus = UpdateDiagnostics.Load(configuration) }, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                catch { /* Best-effort status delivery; protected local evidence is retained. */ }
+            await Task.Delay(TimeSpan.FromSeconds(10), ct);
         }
     }
 
@@ -93,8 +124,8 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     }
                 }
                 var response = snapshot.HasValue
-                    ? await api.CheckInAsync(new { bootId, inventory = snapshot.Value }, ct)
-                    : await api.CheckInAsync(new { bootId }, ct);
+                    ? await api.CheckInAsync(new { bootId, inventory = snapshot.Value, updateStatus = UpdateDiagnostics.Load(configuration) }, ct)
+                    : await api.CheckInAsync(new { bootId, updateStatus = UpdateDiagnostics.Load(configuration) }, ct);
                 if (response.ValueKind == JsonValueKind.Object && response.TryGetProperty("inventoryMinutes", out var minutes) &&
                     minutes.TryGetInt32(out var serverMinutes) && serverMinutes is >= 1 and <= 1440 && serverMinutes != inventoryMinutes)
                 {
