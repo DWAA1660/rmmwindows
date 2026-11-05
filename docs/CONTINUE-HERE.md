@@ -1,4 +1,17 @@
-# Continue here — updated 2026-11-05 ~07:30 MST (Claude)
+# Continue here — updated 2026-11-05 (agent update investigation)
+
+## Latest checkpoint — read before the older handoff below
+
+- PR #5 merged as `dc44403388e3187323dbd86c2f9cac808bc5d5a2` after complete Windows agent, server/web and Linux container CI passed (run `42051042776`). Production deployment succeeded at 15:08 UTC: healthy website, public agent **0.1.8** (78,887,530 bytes), schema **9**. Other ten Docker containers retained their existing uptime.
+- RESEARCH / Cody Public was actually running **0.1.6**. Its verified 0.1.7 package was staged, but installer transcript stopped with "The pipeline has been stopped" before enrollment preservation. The following Windows reboot occurred inside the update attempt's 30-minute backoff. The old agent checks only at service startup, leaving it old after that reboot. Exact original installer interruption cause remains unproven; staged installer directory validation passed independently.
+- New agent: startup plus **15-minute idle checks**, defers while a terminal/support session is active, retains bounded per-package backoff/attempt limits, reports safe structured update evidence before inventory and on heartbeats. It never requeues commands or reboots Windows. Download body has a ten-minute deadline. Installer directory enumeration avoids early-termination pipelines and now logs setup checkpoints.
+- Dashboard: Agent updates panel and endpoint update details show stage, fixed failure reason/code, retry time, attempts, version and server receipt age. Missing reports from old agents mean unknown, never fabricated failure. Server stores latest report plus at most 100 transitions per endpoint; command output is unaffected. See `HANDOFF-UPDATE-AGENT.md`, `HANDOFF-UPDATE-SERVER.md`, `HANDOFF-UPDATE-WEB.md` and API.md.
+- Verified locally: server 47 tests, web 23 tests/build, agent 33 self-tests, companion self-tests, installer/bootstrap checks, full real console-agent/API integration (complete output, no replay, files, persistent stateful terminal). CI independently passed packaging and non-root container/public download smoke. No staff screen capture/control was used.
+- **RESEARCH repaired and verified:** one delayed service-only restart exercised its own automatic updater; installed **0.1.8** at 15:09 UTC, same endpoint ID and Windows boot time (15:03:12.500 UTC before and after this maintenance). Its signed-in desktop was untouched. Structured report says current/complete, attempt1, correct published SHA256, no error. Live file browser successfully listed drives and C:\\ after upgrading. Persistent terminal verification is in progress.
+- Restart launcher job `10ae3d27-657c-4d45-a2ba-e3ec6f927eda` retained its scheduling output but old 0.1.6 marked it interrupted because a child retained an output pipe. **Do not rerun it**: its one scheduled restart and automatic update both succeeded. Earlier diagnostic jobs remain untouched. The website initially showed a historical retry-eligibility timestamp even for a successful current report; a small UI follow-up hides that and labels retry as Not needed (build passed).
+- Remaining verification limit: new 15-minute idle scheduling/backoff is tested locally, but no newer package has yet been published to observe a second live periodic upgrade. Real staff screen capture/control and Windows secure desktop were not tested by this work.
+
+---
 
 ## Current state (read this first)
 
