@@ -1,4 +1,22 @@
-# Continue here — endpoint improvements, persistent terminal, support settings
+# Continue here — updated 2026-11-05 ~00:10 MST (Claude)
+
+## Current state (read this first)
+
+- **PR #2** https://github.com/DWAA1660/rmmwindows/pull/2 (branch `feature/endpoint-terminal`): endpoint directory/AD inventory, persistent terminal (race FIXED), group deletion, multi-monitor support, independent support prompt/indicator policy, agent+companion 0.1.7. **All 4 CI checks green, mergeable, NOT merged**: the overnight session's `gh pr merge` (which deploys to production) was blocked by the permission classifier. The user must merge it (or explicitly allow it).
+- **PR #3** https://github.com/DWAA1660/rmmwindows/pull/3 (branch `feature/qol-fleet-tools`, stacked on #2): Software page with CSV export, 17 starter scripts, Ctrl+K quick search, Activity filters, Needs-reboot tab/badge, run-dialog timeout selector, Fleet health panel. Web 18/18 + build locally; check its CI with `gh pr checks 3`. Merge #2 first; GitHub retargets #3 to main.
+- Production (rmm.parkcountylibrary.org) is still on main `065dc07` (agent 0.1.6) until #2 is merged. Merging main auto-deploys within ~5 minutes; verify with `curl https://rmm.parkcountylibrary.org/api/health` and `/api/agent-download`.
+- If merging is blocked again, do NOT work around it: leave PRs green and tell the user one click merges them.
+- Verified overnight: all suites (server 42/42, web 18/18, agent 32/32, companion, installer, bootstrap, real-agent integration incl. persistent terminal) and browser QA against a local server + real agent on this domain-joined PC (real AD OU/DN shown, terminal state persists, starter script runs end to end).
+- Local QA helper (not in repo) used: start a server with a temp DB + a real console agent auto-approved; never install the service.
+
+## Good next steps
+
+1. Merge #2, then #3 (after CI), confirm deploy and agent 0.1.7 download.
+2. Ideas not started: scheduled starter scripts from the catalog, per-computer notes, software-version alerting (e.g. outdated Chrome), saved searches, dark mode, email/Teams alerts for offline/low-disk, maintenance windows for reboots.
+3. Real-endpoint checks still pending: service-context terminal, multi-monitor capture/input, hidden-indicator support mode on a staff desktop.
+
+
+## Earlier handoff (endpoint/terminal work)
 
 Updated2026-11-04 at the user's explicit request to document immediately before usage runs out.
 
