@@ -18,10 +18,11 @@ internal sealed class SupportConnection(SupportBootstrap bootstrap) : IDisposabl
         await socket.ConnectAsync(bootstrap.Validate(DateTimeOffset.UtcNow), transport, ct);
     }
     public Task SendJsonAsync(object value, CancellationToken ct) => SendAsync(JsonSerializer.SerializeToUtf8Bytes(value, SupportBootstrap.Json), WebSocketMessageType.Text, ct);
+    /// <summary>Sends one "RMF1" frame (see SupportFrameFormat).</summary>
     public Task SendFrameAsync(byte[] frame, CancellationToken ct)
     {
-        if (frame.Length is < 4 or > 1024 * 1024 || frame[0] != 0xff || frame[1] != 0xd8)
-            throw new InvalidDataException("Invalid support JPEG frame.");
+        if (frame.Length is < 14 or > 1024 * 1024 || !frame.AsSpan(0, 4).SequenceEqual("RMF1"u8))
+            throw new InvalidDataException("Invalid support frame.");
         return SendAsync(frame, WebSocketMessageType.Binary, ct);
     }
     private async Task SendAsync(byte[] bytes, WebSocketMessageType type, CancellationToken ct)

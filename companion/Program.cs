@@ -19,24 +19,30 @@ internal static class Program
         }
         if (args.SequenceEqual(["--desktop-smoke-test"]))
         {
-            // Manual developer check of the sign-in-screen helper's desktop thread on the current desktop:
-            // attach, enumerate monitors and capture one frame in memory (discarded, never sent or saved).
-            using var thread = new InputDesktopThread();
+            // Manual developer check of the screen helper's desktop thread on the current desktop: attach, enumerate
+            // monitors, encode one keyframe and one unchanged frame in memory (discarded, never sent or saved).
+            using var thread = new InputDesktopThread("Smoke test");
+            using var encoder = new FrameEncoder();
             var result = thread.RunAsync(() =>
             {
                 var desktop = thread.Attach();
                 var monitors = InputDesktopThread.Monitors();
-                var frame = monitors.Count > 0 ? DesktopCapture.Capture(monitors[0].Bounds) : [];
-                return (desktop, monitors.Count, frame.Length, InputDesktopThread.EmergencyKeysDown());
+                var watch = Stopwatch.StartNew();
+                var keyframe = monitors.Count > 0 ? encoder.Next(monitors[0].Bounds, 1, keyframe: true, heartbeat: false) : null;
+                var first = watch.ElapsedMilliseconds; watch.Restart();
+                var unchanged = monitors.Count > 0 ? encoder.Next(monitors[0].Bounds, 2, keyframe: false, heartbeat: true) : null;
+                var changed = string.Join(" ", encoder.LastRects.Select(rect => $"{rect.Width}x{rect.Height}@{rect.X},{rect.Y}"));
+                return (desktop, monitors.Count, keyframe?.Length ?? 0, first, unchanged?.Length ?? 0, watch.ElapsedMilliseconds, InputDesktopThread.EmergencyKeysDown(), changed);
             }).GetAwaiter().GetResult();
-            Console.WriteLine($"desktop={result.desktop} monitors={result.Item2} jpegBytes={result.Item3} emergencyKeysDown={result.Item4}");
-            return result.desktop is not null && result.Item2 > 0 && result.Item3 > 0 && !result.Item4 ? 0 : 1;
+            Console.WriteLine($"desktop={result.desktop} monitors={result.Item2} keyframeBytes={result.Item3} keyframeMs={result.first} nextFrameBytes={result.Item5} nextFrameMs={result.Item6} emergencyKeysDown={result.Item7} changed=[{result.changed}]");
+            return result.desktop is not null && result.Item2 > 0 && result.Item3 > 0 && !result.Item7 ? 0 : 1;
         }
         try
         {
-            if (args.Length != 4|| args[0] != "--pipe" || args[2] != "--service-pid" ||
+            if (args.Length != 6 || args[0] != "--pipe" || args[2] != "--service-pid" || args[4] != "--mode" || args[5] is not ("engine" or "notice") ||
                 !args[1].StartsWith("LibraryRmm.Support.", StringComparison.Ordinal) || args[1].Length != 51 ||
                 !int.TryParse(args[3], out var servicePid) || servicePid <= 0) return 2;
+            var engine = args[5] == "engine";
             using var pipe = new NamedPipeClientStream(".", args[1], PipeDirection.InOut, PipeOptions.Asynchronous);
             using var bootstrapTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             pipe.ConnectAsync(bootstrapTimeout.Token).GetAwaiter().GetResult();
@@ -46,23 +52,30 @@ internal static class Program
             writer.WriteLine("LIBRARY-RMM-SUPPORT/1");
             var line = SupportPipeFraming.ReadLineAsync(reader, 8192, bootstrapTimeout.Token).GetAwaiter().GetResult();
             if (line is null || line.Length > 8192) return 4;
-            var bootstrap = JsonSerializer.Deserialize<SupportBootstrap>(line, SupportBootstrap.Json) ?? throw new InvalidDataException("Missing support bootstrap.");
-            bootstrap.Validate(DateTimeOffset.UtcNow);
-            if (bootstrap.ServiceProcessId != servicePid || bootstrap.UserSessionId != Process.GetCurrentProcess().SessionId) return 5;
-            // The sign-in screen mode exists only as SYSTEM (started by the service); the normal mode never runs as SYSTEM.
-            using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
-                if (identity.IsSystem != bootstrap.SignInScreen) return 6;
-            writer.WriteLine("BOOTSTRAP-RECEIVED");
-            if (bootstrap.SignInScreen)
+            bool isSystem;
+            using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent()) isSystem = identity.IsSystem;
+            if (engine)
             {
-                using var signIn = new SignInScreenSession(bootstrap, reader, writer);
-                signIn.RunAsync().GetAwaiter().GetResult();
+                // The screen helper exists only as SYSTEM, started by the service.
+                var bootstrap = JsonSerializer.Deserialize<SupportBootstrap>(line, SupportBootstrap.Json) ?? throw new InvalidDataException("Missing support bootstrap.");
+                bootstrap.Validate(DateTimeOffset.UtcNow);
+                if (bootstrap.ServiceProcessId != servicePid || bootstrap.UserSessionId != Process.GetCurrentProcess().SessionId) return 5;
+                if (!isSystem || !bootstrap.SystemHelper) return 6;
+                writer.WriteLine("BOOTSTRAP-RECEIVED");
+                using var session = new SupportEngine(bootstrap, reader, writer);
+                session.RunAsync().GetAwaiter().GetResult();
                 return 0;
             }
+            // The notice exists only as the signed-in (non-SYSTEM) user, and holds no relay credential.
+            var notice = JsonSerializer.Deserialize<SupportNoticeBootstrap>(line, SupportBootstrap.Json) ?? throw new InvalidDataException("Missing support notice.");
+            notice.Validate(DateTimeOffset.UtcNow);
+            if (notice.ServiceProcessId != servicePid || notice.UserSessionId != Process.GetCurrentProcess().SessionId) return 5;
+            if (isSystem) return 6;
+            writer.WriteLine("BOOTSTRAP-RECEIVED");
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using var window = new SupportWindow(bootstrap, reader, writer);
+            using var window = new SupportWindow(notice, reader, writer);
             Application.Run(window);
             return 0;
         }

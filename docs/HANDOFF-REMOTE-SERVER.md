@@ -44,3 +44,7 @@ New tests use isolated SQLite + real HTTP/WebSocket connections and fake endpoin
 - `ws` dependency installed with0reported npm audit vulnerabilities at install time. Official API reference reviewed: https://github.com/websockets/ws/blob/master/doc/ws.md.
 
 No Git commit/push/deployment performed by this contributor. Paths changed: server src support/db/app/index, package manifests, support tests, schema expectation in accounts test, this handoff.
+
+## 2026-11-05 — agent/companion 0.1.11 supersedes parts of this handoff
+
+See ARCHITECTURE.md → Remote support (Takeover, Screen helper + notice, Frames) and API.md "Agent 0.1.11+". Capture and input now run in a SYSTEM screen helper that follows the input desktop (Ctrl+Alt+Delete, lock, sign-in, UAC stay visible and controllable); the user-session companion is notice/indicator/hotkey only; frames are acknowledged RMF1 delta frames; a new session for an endpoint ends the open one (`replaced_by_new_session`). Statements below about 1600 px/3 fps whole JPEGs, pausing on secure desktops or one session per endpoint returning 409 describe agents up to 0.1.10.

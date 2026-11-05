@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import "./RemoteSupport.css";
 import { supportEndReason } from "./supportEndReason";
+import { parseSupportFrame } from "./supportFrames";
 
 type SupportStatus =
   | "requested"
@@ -75,7 +76,12 @@ type StreamMessage =
     }
   | { type: "display"; id?: string; width: number; height: number }
   | { type: "displays"; displays: SupportDisplay[] }
-  | { type: "capabilities"; secureAttention: boolean; secureDesktop: boolean }
+  | {
+      type: "capabilities";
+      secureAttention: boolean;
+      secureDesktop: boolean;
+      deltaFrames?: boolean;
+    }
   | {
       type: "secureAttentionResult";
       requestId: string;
@@ -201,8 +207,135 @@ export function RemoteSupport() {
     framePresent = useRef(false),
     connectedRef = useRef(false);
 
+  const frameQueue = useRef<Promise<void>>(Promise.resolve()),
+    needKeyframe = useRef(true),
+    lastRefresh = useRef(0),
+    lastFrameState = useRef(0),
+    framesDrawn = useRef(0);
+  const [fps, setFps] = useState(0),
+    [secureDesktop, setSecureDesktop] = useState(false);
+
+  const sendControl = (message: object) => {
+    if (socket.current?.readyState === WebSocket.OPEN)
+      socket.current.send(JSON.stringify(message));
+  };
+  // Asks the endpoint to repaint the whole screen (after a pause, a stale picture or a lost patch).
+  const requestRefresh = () => {
+    if (Date.now() - lastRefresh.current < 1000) return;
+    lastRefresh.current = Date.now();
+    sendControl({ type: "refresh" });
+  };
+  const viewable = () =>
+    !disposed.current &&
+    !stopped.current &&
+    currentSession.current?.status === "active" &&
+    !currentPaused.current &&
+    !(
+      requestedDisplayId.current &&
+      (!displaySwitchConfirmed.current || !displaySwitchResumed.current)
+    );
+  const frameShown = (width: number, height: number) => {
+    lastFrame.current = Date.now();
+    framePresent.current = true;
+    // The footer only needs about-right timing; avoid re-rendering on every frame.
+    if (lastFrame.current - lastFrameState.current > 500) {
+      lastFrameState.current = lastFrame.current;
+      setFrameAt(lastFrame.current);
+    }
+    setStale(false);
+    setHasFrame(true);
+    setDisplay((previous) =>
+      previous.width > 0 ? previous : { width, height },
+    );
+    if (requestedDisplayId.current) {
+      requestedDisplayId.current = null;
+      setSwitchingDisplay(false);
+    }
+  };
+  const drawFrame = async (data: ArrayBuffer) => {
+    const frame = parseSupportFrame(data);
+    if (!frame) return;
+    // Acknowledge every frame, drawn or not: the endpoint sends the next one only after this,
+    // so the picture never falls behind a queue on a slow connection.
+    if (frame.kind === "delta") sendControl({ type: "frameAck", seq: frame.seq });
+    const surface = canvas.current;
+    if (!viewable() || !surface) {
+      needKeyframe.current = true;
+      return;
+    }
+    const sequence = frameSequence.current;
+    if (frame.kind === "jpeg") {
+      // Agents before 0.1.11 send one whole JPEG per frame.
+      const bitmap = await createImageBitmap(
+        new Blob([data], { type: "image/jpeg" }),
+      );
+      try {
+        if (
+          sequence !== frameSequence.current ||
+          !viewable() ||
+          bitmap.width <= 0 ||
+          bitmap.height <= 0 ||
+          bitmap.width > 16384 ||
+          bitmap.height > 16384
+        )
+          return;
+        if (surface.width !== bitmap.width || surface.height !== bitmap.height) {
+          surface.width = bitmap.width;
+          surface.height = bitmap.height;
+        }
+        surface.getContext("2d", { alpha: false })?.drawImage(bitmap, 0, 0);
+      } finally {
+        bitmap.close();
+      }
+      framesDrawn.current++;
+      frameShown(surface.width, surface.height);
+      return;
+    }
+    if (
+      !frame.keyframe &&
+      (needKeyframe.current ||
+        surface.width !== frame.width ||
+        surface.height !== frame.height)
+    ) {
+      // A patch without the picture under it would show a mix of old and new screens.
+      requestRefresh();
+      return;
+    }
+    const bitmaps = await Promise.all(
+      frame.rects.map((rect) =>
+        createImageBitmap(
+          new Blob([data.slice(rect.start, rect.end)], { type: "image/jpeg" }),
+        ),
+      ),
+    );
+    try {
+      if (sequence !== frameSequence.current || !viewable()) {
+        needKeyframe.current = true;
+        return;
+      }
+      if (
+        frame.keyframe &&
+        (surface.width !== frame.width || surface.height !== frame.height)
+      ) {
+        surface.width = frame.width;
+        surface.height = frame.height;
+      }
+      const context = surface.getContext("2d", { alpha: false });
+      if (!context) return;
+      frame.rects.forEach((rect, index) =>
+        context.drawImage(bitmaps[index], rect.x, rect.y, rect.width, rect.height),
+      );
+      if (frame.keyframe) needKeyframe.current = false;
+      if (frame.rects.length) framesDrawn.current++;
+      frameShown(frame.width, frame.height);
+    } finally {
+      bitmaps.forEach((bitmap) => bitmap.close());
+    }
+  };
+
   const clearFrame = () => {
     // Clear sensitive pixels promptly on pause, session withdrawal, stop or disconnect.
+    needKeyframe.current = true;
     frameSequence.current++;
     const context = canvas.current?.getContext("2d");
     if (context && canvas.current)
@@ -360,7 +493,7 @@ export function RemoteSupport() {
           "rmm-support",
           `ticket.${ticket.ticket}`,
         ]);
-        ws.binaryType = "blob";
+        ws.binaryType = "arraybuffer";
         socket.current = ws;
         ws.onopen = () => {
           if (!disposed.current) {
@@ -430,6 +563,7 @@ export function RemoteSupport() {
                 }
               } else if (message.type === "capabilities") {
                 setSecureAttentionAvailable(message.secureAttention === true);
+                setSecureDesktop(message.secureDesktop === true);
               } else if (
                 message.type === "secureAttentionResult" &&
                 message.requestId === secureAttentionRequest.current &&
@@ -477,67 +611,18 @@ export function RemoteSupport() {
             return;
           }
           if (
-            !(event.data instanceof Blob) ||
-            event.data.size > 8 * 1024 * 1024 ||
-            currentSession.current?.status !== "active" ||
-            currentPaused.current ||
-            stopped.current ||
-            (requestedDisplayId.current &&
-              (!displaySwitchConfirmed.current ||
-                !displaySwitchResumed.current))
+            !(event.data instanceof ArrayBuffer) ||
+            event.data.byteLength > 8 * 1024 * 1024
           )
             return;
-          const sequence = ++frameSequence.current;
-          let bitmap: ImageBitmap | null = null;
-          try {
-            bitmap = await createImageBitmap(event.data);
-            if (
-              disposed.current ||
-              sequence !== frameSequence.current ||
-              currentSession.current?.status !== "active" ||
-              currentPaused.current ||
-              stopped.current ||
-              (requestedDisplayId.current &&
-                (!displaySwitchConfirmed.current ||
-                  !displaySwitchResumed.current)) ||
-              !canvas.current
-            )
-              return;
-            // Canvas drawing avoids blob image URLs and retains only the current frame.
-            if (
-              bitmap.width <= 0 ||
-              bitmap.height <= 0 ||
-              bitmap.width > 16384 ||
-              bitmap.height > 16384
-            )
-              return;
-            const surface = canvas.current;
-            if (
-              surface.width !== bitmap.width ||
-              surface.height !== bitmap.height
-            ) {
-              surface.width = bitmap.width;
-              surface.height = bitmap.height;
-              const dimensions = { width: bitmap.width, height: bitmap.height };
-              setDisplay((previous) =>
-                previous.width > 0 ? previous : dimensions,
-              );
-            }
-            surface.getContext("2d", { alpha: false })?.drawImage(bitmap, 0, 0);
-            lastFrame.current = Date.now();
-            framePresent.current = true;
-            setFrameAt(lastFrame.current);
-            setStale(false);
-            setHasFrame(true);
-            if (requestedDisplayId.current) {
-              requestedDisplayId.current = null;
-              setSwitchingDisplay(false);
-            }
-          } catch {
-            /* A failed JPEG decode never shows an old frame as a new one. */
-          } finally {
-            bitmap?.close();
-          }
+          // Frames decode strictly in order: a patch must land on the picture it was made against.
+          const data = event.data;
+          frameQueue.current = frameQueue.current
+            .then(() => drawFrame(data))
+            .catch(() => {
+              /* A failed decode never shows an old frame as a new one. */
+              needKeyframe.current = true;
+            });
         };
         ws.onerror = () => {
           if (!disposed.current)
@@ -608,6 +693,8 @@ export function RemoteSupport() {
     };
     const timer = window.setInterval(() => {
       setNow(Date.now());
+      setFps(framesDrawn.current);
+      framesDrawn.current = 0;
       const current = currentSession.current;
       if (
         current &&
@@ -624,6 +711,7 @@ export function RemoteSupport() {
         setStale(true);
         disableControl();
         clearFrame();
+        requestRefresh();
       }
     }, 1000);
     window.addEventListener("blur", blur);
@@ -903,8 +991,10 @@ export function RemoteSupport() {
     ["requested", "awaiting_consent"].includes(session?.status || "");
   const ended = terminal(session?.status) || localStopped;
   const endReason = terminal(session?.status) ? supportEndReason(session) : "";
-  // Set by the agent's SYSTEM helper when nobody was signed in to the computer.
-  const signInScreen = session?.consentUser === "Windows sign-in screen";
+  // Set by the agent's SYSTEM screen helper when nobody was signed in, or the computer was locked, at the start.
+  const signInScreen =
+    session?.consentUser === "Windows sign-in screen" ||
+    session?.consentUser === "Windows lock screen";
   const showOverlay = !hasFrame || paused || stale || ended || switchingDisplay;
   const overlayTitle = ended
     ? statusText
@@ -969,8 +1059,8 @@ export function RemoteSupport() {
             : session?.status === "active"
               ? signInScreen
                 ? showSessionDetails || approvalRequired
-                  ? "Showing the Windows sign-in screen without a notice or banner. The session ends when someone signs in. Ctrl+Alt+Shift+F12 ends it locally."
-                  : "Showing the Windows sign-in screen without a notice or banner; it continues if someone signs in. Ctrl+Alt+Shift+F12 ends it locally."
+                  ? "Showing the Windows sign-in/lock screen. When someone signs in, their desktop appears after the configured notice on it is approved or its countdown ends. Ctrl+Alt+Shift+F12 ends it locally."
+                  : "Showing the Windows sign-in/lock screen without a notice or banner; it continues if someone signs in. Ctrl+Alt+Shift+F12 ends it locally."
                 : showSessionDetails
                 ? "The staff computer keeps a visible sharing indicator. Ctrl+Alt+Shift+F12 ends sharing locally."
                 : "No staff banner or icon is shown for this session. Ctrl+Alt+Shift+F12 still ends sharing locally."
@@ -1029,8 +1119,8 @@ export function RemoteSupport() {
                 ? "Native Ctrl+Alt+Delete is unavailable on this endpoint."
                 : !controlEnabled
                   ? "Enable remote control to request Ctrl+Alt+Delete."
-                  : signInScreen
-                    ? "Send Ctrl+Alt+Delete to the computer's Windows sign-in screen."
+                  : secureDesktop
+                    ? "Send Ctrl+Alt+Delete. The Windows security, lock or sign-in screen appears here and stays controllable."
                     : "Request the Windows security screen. Viewing and control pause on protected desktops."
             }
           >
@@ -1117,9 +1207,9 @@ export function RemoteSupport() {
       <div className="rs-security-note" id="rs-security-limits">
         <LockKeyhole size={13} />
         <span>
-          {signInScreen
-            ? "Nobody was signed in (or the computer was locked), so this session shows the Windows sign-in screen. Viewing and control continue on the sign-in, lock and Ctrl+Alt+Delete screens. Windows policy must allow service-generated Ctrl+Alt+Delete; this app does not change it."
-            : "Ctrl+Alt+Delete requests the Windows security screen. Viewing and control pause there until someone returns to the regular desktop. Windows policy must allow service-generated secure attention; this app does not change it."}
+          {secureDesktop
+            ? "Ctrl+Alt+Delete, lock, sign-in and UAC screens are shown and controllable here, so you can sign in or unlock for the user. Windows policy must allow service-generated Ctrl+Alt+Delete; this app does not change it."
+            : "Ctrl+Alt+Delete requests the Windows security screen. Viewing and control pause there until someone returns to the regular desktop (update the agent to 0.1.11 to see it). Windows policy must allow service-generated secure attention; this app does not change it."}
         </span>
       </div>
       {secureAttentionFeedback && (
@@ -1135,6 +1225,7 @@ export function RemoteSupport() {
           <span>
             {secureAttentionFeedback.message}
             {secureAttentionFeedback.success &&
+              !secureDesktop &&
               " Confirmation covers the request, not viewing or controlling a protected Windows screen."}
           </span>
           <button
@@ -1274,7 +1365,9 @@ export function RemoteSupport() {
           {hasFrame && frameAt ? (
             <>
               <Signal size={12} />
-              Last frame {Math.max(0, Math.floor((now - frameAt) / 1000))}s ago
+              {fps > 0
+                ? `${fps} fps`
+                : `Still screen · updated ${Math.max(0, Math.floor((now - frameAt) / 1000))}s ago`}
             </>
           ) : (
             <>
@@ -1284,7 +1377,7 @@ export function RemoteSupport() {
           )}
         </span>
         <span className="rs-footer-limit">
-          {signInScreen
+          {secureDesktop
             ? "No clipboard or file transfer"
             : "No clipboard or file transfer · Protected Windows prompts cannot be controlled"}
         </span>
