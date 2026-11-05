@@ -13,6 +13,8 @@ internal static class AgentSelfTests
     {
         var tests = new (string Name, Func<Task> Run)[]
         {
+            ("support permission, countdown, origin and input gates (no desktop access)", LibraryRmm.Support.SupportSelfTests.RunAsync),
+            ("secure-attention broker scope, policy and replay gates (no Windows calls)", SupportBrokerSelfTests.RunAsync),
             ("UTF-8 chunks preserve long output and surrogate pairs", ChunkIntegrityAsync),
             ("execution gate requires a fresh true response and never retries", ExecutionGateAsync),
             ("recovery uploads interruption and existing output without replay", RecoveryAsync),

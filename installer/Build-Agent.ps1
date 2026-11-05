@@ -27,11 +27,15 @@ $binaries = Join-Path $stage 'agent'
 New-Item -Path $binaries -ItemType Directory -Force | Out-Null
 & $DotnetPath publish $project --configuration Release --runtime $Runtime --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$Version --output $binaries
 if ($LASTEXITCODE -ne 0) { throw 'Agent publish failed.' }
+$companionBinaries = Join-Path $binaries 'companion'
+& $DotnetPath publish (Join-Path $repository 'companion\LibraryRmm.Support.csproj') --configuration Release --runtime $Runtime --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=$Version --output $companionBinaries
+if ($LASTEXITCODE -ne 0) { throw 'Support companion publish failed.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-Agent.ps1') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-Agent.ps1') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $stage
 $agentHash = (Get-FileHash -LiteralPath (Join-Path $binaries 'LibraryRmm.Agent.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-$manifest = @{ version = $Version; runtime = $Runtime; agentSha256 = $agentHash; builtAtUtc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
+$companionHash = (Get-FileHash -LiteralPath (Join-Path $companionBinaries 'LibraryRmm.Support.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifest = @{ version = $Version; runtime = $Runtime; agentSha256 = $agentHash; companionSha256 = $companionHash; builtAtUtc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $stage 'package-manifest.json'), $manifest, (New-Object Text.UTF8Encoding($false)))
 $archive = Join-Path $absoluteOutput ("library-rmm-agent-$Version-$Runtime.zip")
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force

@@ -253,6 +253,17 @@ internal sealed class AgentUpdater : IDisposable
         using var stream = File.OpenRead(executable);
         if (Convert.ToHexStringLower(SHA256.HashData(stream)) != expectedAgentHash.ToLowerInvariant())
             throw new InvalidDataException("Agent executable hash does not match the package manifest.");
+        // Older releases have no companion field. When advertised, validate it before handing
+        // the verified installer to the update helper; the archive hash already covers all files.
+        if (inner.TryGetProperty("companionSha256", out var supportHash))
+        {
+            var supportExe = Path.Combine(root, "agent", "companion", "LibraryRmm.Support.exe");
+            if (!File.Exists(supportExe) || supportHash.GetString() is not { } expectedSupportHash)
+                throw new InvalidDataException("Support companion is missing from this package.");
+            using var supportStream = File.OpenRead(supportExe);
+            if (Convert.ToHexStringLower(SHA256.HashData(supportStream)) != expectedSupportHash.ToLowerInvariant())
+                throw new InvalidDataException("Support companion hash does not match the package manifest.");
+        }
     }
 
     private void Launch(StagedUpdate staged, string installDirectory)

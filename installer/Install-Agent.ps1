@@ -37,6 +37,16 @@ function Protect-Directory([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+# Only this non-secret executable subtree is readable by the interactive staff account.
+# The service executable, agent.json and output spool retain their SYSTEM/Admin-only ACLs.
+function Protect-CompanionDirectory([string]$Path) {
+    Protect-Directory $Path
+    $acl = Get-Acl -LiteralPath $Path
+    $users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($users, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Assert-LocalDirectory([string]$Path) {
     if ($Path -notmatch '^[A-Za-z]:\\') { throw 'Install/data directories must be absolute local drive paths.' }
     $resolved = [IO.Path]::GetFullPath($Path)
@@ -105,11 +115,36 @@ Assert-OwnedDirectory $InstallDirectory 'install'
 Assert-OwnedDirectory $DataDirectory 'data'
 $sourceExe = Join-Path $BinaryDirectory 'LibraryRmm.Agent.exe'
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "Agent binary not found. Extract the release zip first: $sourceExe" }
+$sourceCompanion = Join-Path $BinaryDirectory 'companion'
+$targetCompanion = Join-Path $InstallDirectory 'companion'
+# Validate every source/destination entry before stopping the service or copying. Never follow
+# a pre-existing junction into another product's directory during an update.
+foreach ($tree in @($sourceCompanion, $targetCompanion)) {
+    if (Test-Path -LiteralPath $tree) {
+        $pending = New-Object 'Collections.Generic.Queue[string]'
+        $pending.Enqueue($tree)
+        while ($pending.Count -gt 0) {
+            $item = Get-Item -LiteralPath $pending.Dequeue() -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Support companion files cannot contain reparse points.' }
+            if ($item.PSIsContainer) {
+                foreach ($child in (Get-ChildItem -LiteralPath $item.FullName -Force)) { $pending.Enqueue($child.FullName) }
+            }
+        }
+    }
+}
 $manifestPath = Join-Path $PSScriptRoot 'package-manifest.json'
 if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $actualHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($manifest.agentSha256 -ne $actualHash) { throw 'Agent SHA256 does not match this release package manifest.' }
+    $companionHashProperty = $manifest.PSObject.Properties['companionSha256']
+    if ($companionHashProperty) {
+        $supportExe = Join-Path $sourceCompanion 'LibraryRmm.Support.exe'
+        if (-not (Test-Path -LiteralPath $supportExe -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $supportExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $companionHashProperty.Value) {
+            throw 'Support companion SHA256 does not match this release package manifest.'
+        }
+    }
 }
 Protect-Directory $InstallDirectory
 Protect-Directory $DataDirectory
@@ -190,6 +225,14 @@ if ($existing) {
 }
 Get-ChildItem -LiteralPath $BinaryDirectory -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $InstallDirectory $_.Name) -Force
+}
+if (Test-Path -LiteralPath $sourceCompanion -PathType Container) {
+    Protect-CompanionDirectory $targetCompanion
+    Get-ChildItem -LiteralPath $sourceCompanion -Force | Copy-Item -Destination $targetCompanion -Recurse -Force
+    # Reset copied/previous file ACLs to inherit from this dedicated RX-only subtree.
+    & icacls.exe $targetCompanion /reset /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to reset support companion file permissions.' }
+    Protect-CompanionDirectory $targetCompanion
 }
 # Register in Control Panel > Programs and Features and Settings > Apps, with an uninstaller
 # that lives next to the agent (the setup folder may be a deleted temporary directory).

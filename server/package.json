@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.0.0" },
-  "scripts": { "start": "node src/index.mjs", "test": "node --test test/*.test.mjs" },
-  "dependencies": { "express": "^5.1.0" }
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.22.1"
+  }
 }

@@ -1,5 +1,11 @@
 # Continue here — updated 2026-11-04 (Claude)
 
+## Latest Codex work — remote support
+
+Endpoint groups and persisted bulk results are deployed (commit04874b8). Remote support source is on `feature/attended-support`: dedicated browser window, non-elevated Windows companion, live cursor/mouse/keyboard, admin notice policy (default15second auto-approval; configurable1–300; optional form bypass), always-visible indicator and Ctrl+Alt+Shift+F12 local emergency end. Agent0.1.6 required. Native Ctrl+Alt+Delete uses a scoped service broker and existing Windows services SAS policy; no fake key chord or policy rewrite. See `HANDOFF-REMOTE-{AGENT,SERVER,WEB}.md` and latest PROGRESS entries for verification/deployment status.
+
+**Windows sign-in/secure desktop view/control remains unimplemented.** The current helper needs an active signed-in user and pauses at Winlogon/UAC/lock. A test VM endpoint has been requested for developing/validating that additional SYSTEM desktop transport. Never describe the CAD request as sign-in control. No real staff screen, native SAS or service/companion launch has been exercised by Codex for this feature yet. Earlier historical items below may already be completed; use latest PROGRESS evidence.
+
 The Codex handoff that used to live here has been worked through. Current state:
 
 ## Done since the Codex handoff
@@ -15,8 +21,8 @@ The Codex handoff that used to live here has been worked through. Current state:
 2. **Initial manual upgrade of existing endpoints** (e.g. RESEARCH) from 0.1.0 → 0.1.1 by re-running the website install command, only after any running job there finishes. 0.1.0 has no updater.
 3. Real SFC/DISM run on a test endpoint to confirm progress appears live in the console (only synthetic native children were tested).
 4. Test the tokenless installer on a real Windows VM: install, approve in the console, confirm it appears and runs a job. Then confirm "Library RMM Agent" appears in Programs and Features and that Uninstall removes the service, folders and entry and shows the endpoint as revoked.
-5. Later features from the original brief: consented screen viewing with a visible indicator, Action1 deployment, signed packages, MFA/SMTP.
+5. Later features: Windows sign-in/secure desktop support, signed packages, MFA/SMTP. Remote ordinary-desktop support is now implemented; see current feature handoffs.
 
 ## Rules that still apply
 
-At-most-once job dispatch (never requeue), never truncate output, consented visible screen viewing only, no secrets in Git, pushing `main` auto-deploys to production (keep half-finished work off `main`). The admin SSH key on this PC is NOT accepted by the server; key-based access would need to be set up by the user. Local .NET 10 SDK: `artifacts/dotnet-sdk/dotnet.exe`.
+At-most-once job dispatch (never requeue), never truncate output, visible screen support following the latest admin-configured notice policy, no secrets in Git, pushing `main` auto-deploys to production (keep half-finished work off `main`). The admin SSH key on this PC is NOT accepted by the server; key-based access would need to be set up by the user. Local .NET10 SDK: `artifacts/dotnet-sdk/dotnet.exe`.

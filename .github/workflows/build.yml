@@ -41,6 +41,9 @@ jobs:
       - name: Verify replay and output protections
         shell: pwsh
         run: dotnet run --project agent/LibraryRmm.Agent.csproj --configuration Release -- --self-test
+      - name: Verify support companion without desktop access
+        shell: pwsh
+        run: dotnet run --project companion/LibraryRmm.Support.csproj --configuration Release -- --self-test
       - name: Verify installer target validation
         shell: pwsh
         run: ./installer/Test-InstallerPaths.ps1

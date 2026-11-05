@@ -70,6 +70,8 @@ Image rollback does not automatically undo database migrations. Changes must be 
 
 ## Operations
 
+Remote support requires the dedicated `/api/support/` WebSocket proxy location from `deploy/nginx.conf`. This is a reviewed host configuration change, not applied by the application updater. Back up only this RMM vhost, replace/review it, run `nginx -t`, then reload Nginx. Keep proxy port8088 loopback-only; no other website/container configuration changes are required. Check anonymous WebSocket upgrades are rejected and the support UI is reachable after deployment. Do not start a staff screen session for deployment QA without an identified test endpoint.
+
 ```bash
 systemctl status library-rmm-updater
 journalctl -u library-rmm-updater --since today

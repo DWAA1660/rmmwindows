@@ -57,6 +57,29 @@ export function openDatabase(filename) {
     if (!db.prepare('PRAGMA table_info(jobs)').all().some(column => column.name === 'run_id')) db.exec('ALTER TABLE jobs ADD COLUMN run_id TEXT');
     db.exec('CREATE INDEX IF NOT EXISTS jobs_run ON jobs(run_id);');
   });
+  // v6: attended remote support. Credentials/tickets are hashes; no screen or input data is stored.
+  db.exec(`CREATE TABLE IF NOT EXISTS support_sessions (id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL REFERENCES endpoints(id),
+      operator_id TEXT NOT NULL REFERENCES users(id), operator_session_hash TEXT NOT NULL, operator_name TEXT NOT NULL,
+      status TEXT NOT NULL, requested_control INTEGER NOT NULL, control_approved INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT, end_reason TEXT,
+      job_id TEXT REFERENCES jobs(id), credential_hash TEXT, device_connected INTEGER NOT NULL DEFAULT 0,
+      consent_user TEXT, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, UNIQUE(operator_id,idempotency_key));
+    CREATE UNIQUE INDEX IF NOT EXISTS support_endpoint_active ON support_sessions(endpoint_id)
+      WHERE status IN ('requested','awaiting_consent','active');
+    CREATE TABLE IF NOT EXISTS support_tickets (token_hash TEXT PRIMARY KEY, support_id TEXT NOT NULL REFERENCES support_sessions(id),
+      operator_session_hash TEXT NOT NULL, expires_at TEXT NOT NULL);
+    PRAGMA user_version=6;`);
+  // v7: administrator support notification policy is durable and snapshotted per session.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS support_settings (id INTEGER PRIMARY KEY CHECK(id=1),
+      approval_required INTEGER NOT NULL DEFAULT 1 CHECK(approval_required IN (0,1)),
+      approval_seconds INTEGER NOT NULL DEFAULT 15 CHECK(approval_seconds BETWEEN 1 AND 300));
+      INSERT OR IGNORE INTO support_settings(id) VALUES (1);`);
+    const supportColumns = new Set(db.prepare('PRAGMA table_info(support_sessions)').all().map(column => column.name));
+    if (!supportColumns.has('approval_required')) db.exec('ALTER TABLE support_sessions ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 1');
+    if (!supportColumns.has('approval_seconds')) db.exec('ALTER TABLE support_sessions ADD COLUMN approval_seconds INTEGER NOT NULL DEFAULT 15');
+    db.exec('PRAGMA user_version=7;');
+  });
   return db;
 }
 

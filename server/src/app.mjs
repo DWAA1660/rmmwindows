@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
 import { mountGroups } from './groups.mjs';
+import { mountSupport } from './support.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
@@ -82,6 +83,7 @@ export function createApp(options = {}) {
   const fileDirectory = options.fileDirectory !== undefined ? options.fileDirectory
     : options.db || databasePath === ':memory:' ? null : resolve(dirname(databasePath), 'files');
   const publicOrigin = env.PUBLIC_ORIGIN ? new URL(env.PUBLIC_ORIGIN).origin : null;
+  const supportSocketOrigin = publicOrigin ? publicOrigin.replace(/^http/, 'ws') : '';
   // Full inventory interval pushed to agents on every heartbeat (1-1440 minutes, default 5).
   const inventoryMinutes = Math.min(1440, Math.max(1, Number.parseInt(env.INVENTORY_MINUTES || '5', 10) || 5));
   const secureCookie = env.COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://');
@@ -100,7 +102,7 @@ export function createApp(options = {}) {
   // container port must remain private so clients cannot forge their own IP.
   if (env.TRUST_PROXY === '1') app.set('trust proxy', 1);
   app.use((req, res, next) => {
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" });
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${supportSocketOrigin}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` });
     if (secureCookie) res.set('Strict-Transport-Security', 'max-age=31536000');
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     next();
@@ -340,6 +342,8 @@ export function createApp(options = {}) {
   });
   const files = mountFiles({ db, audit, fail, str, integer, directory: fileDirectory,
     maxFileBytes: options.maxFileBytes, maxTotalBytes: options.maxTotalFileBytes, retentionMs: options.fileRetentionMs });
+  const support = mountSupport({ db, audit, fail, str, insertJob, publicOrigin, validationIntervalMs: options.supportValidationIntervalMs });
+  support.mountAgent(agentRouter);
   files.mountAgent(agentRouter);
   app.use('/api/agent', agentRouter);
 
@@ -518,7 +522,7 @@ export function createApp(options = {}) {
     res.json({ totalEndpoints: endpoints.length, onlineEndpoints: online, offlineEndpoints: endpoints.length - online, domainJoinedEndpoints: endpoints.filter(e => e.inventory.domainJoined).length, diskTotalBytes, diskUsedBytes, lowDiskCount, jobs: counts, activeJobs: (counts.queued || 0) + (counts.dispatched || 0) + (counts.running || 0), scriptCount: db.prepare('SELECT COUNT(*) count FROM scripts').get().count, scheduleCount: db.prepare('SELECT COUNT(*) count FROM schedules WHERE enabled=1').get().count });
   });
   const updateEnabled = Boolean(env.UPDATE_HELPER_URL && env.UPDATE_HELPER_TOKEN);
-  admin.get('/settings', (req, res) => res.json({ version: env.APP_VERSION || '0.1.0', updateEnabled, updateImage: env.UPDATE_IMAGE || null, publicOrigin, screenViewingEnabled: false, executionPolicy: 'at-most-once' }));
+  admin.get('/settings', (req, res) => res.json({ version: env.APP_VERSION || '0.1.0', updateEnabled, updateImage: env.UPDATE_IMAGE || null, publicOrigin, screenViewingEnabled: Boolean(publicOrigin), executionPolicy: 'at-most-once' }));
   async function updateRequest(method, path) {
     if (!updateEnabled) fail(503, 'Application updates are not configured on this server.');
     try {
@@ -533,6 +537,7 @@ export function createApp(options = {}) {
     audit(req.operator.username, 'application.update.requested');
     const result = await updateRequest('POST', '/update'); res.status(202).json(result);
   });
+  support.mountConsole(admin);
   mountJoinConsole(admin);
   files.mountConsole(admin);
   app.use('/api', admin);
@@ -580,5 +585,6 @@ export function createApp(options = {}) {
   }
   // Answer every held long-poll claim with {job:null} (used on shutdown so the listener can close).
   const releaseClaimWaiters = () => { for (const finish of [...claimWaiters]) finish(); };
-  return { app, db, tickSchedules, releaseClaimWaiters, cleanupFiles: files.cleanup, close: () => { releaseClaimWaiters(); files.close(); db.close(); } };
+  return { app, db, tickSchedules, releaseClaimWaiters, attachSupport: support.attach, stopSupport: support.shutdown, cleanupFiles: files.cleanup,
+    close: () => { support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
 }

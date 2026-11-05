@@ -5,9 +5,16 @@ RUN dotnet restore --runtime win-x64
 COPY agent/ ./
 RUN dotnet publish --configuration Release --runtime win-x64 --self-contained true --no-restore -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output /publish
 
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS companion-build
+WORKDIR /build/companion
+COPY companion/ ./
+COPY agent/SupportProtocol.cs agent/SupportSelfTests.cs /build/agent/
+RUN dotnet publish LibraryRmm.Support.csproj --configuration Release --runtime win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output /publish
+
 FROM node:24-bookworm-slim AS agent-package
 RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
 COPY --from=agent-build /publish /package/agent
+COPY --from=companion-build /publish /package/agent/companion
 COPY installer/Install-Agent.ps1 installer/Uninstall-Agent.ps1 installer/README.md /package/
 COPY installer/package-agent.mjs /build/package-agent.mjs
 COPY agent/LibraryRmm.Agent.csproj /build/agent.csproj

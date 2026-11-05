@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>LibraryRmm.Agent</AssemblyName>
-    <Version>0.1.5</Version>
+    <Version>0.1.6</Version>
     <InvariantGlobalization>false</InvariantGlobalization>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>

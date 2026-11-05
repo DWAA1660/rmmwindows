@@ -91,6 +91,8 @@ Storage exploration lists one directory level with recursive logical sizes, an e
 
 ## Building and checks
 
+Agent0.1.6 also packages `agent/companion/LibraryRmm.Support.exe`. The installer verifies its manifest hash, copies that dedicated subtree, and grants Users read/execute there so the service can launch the non-elevated staff companion. The service/configuration/spool remain restricted to SYSTEM and Administrators. Remote support requires an active signed-in user, visible sharing indicator and local emergency end shortcut. Admin notice settings do not enable Winlogon/UAC screen control. No remote support session starts merely by installing or updating.
+
 From the repository root with the supported .NET SDK 10 LTS on Windows:
 
 ```powershell
