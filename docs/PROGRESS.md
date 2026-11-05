@@ -217,3 +217,9 @@ Each contributor owns separate paths; record shipped features, test commands/res
 - **Ctrl+K quick search** (`CommandPalette.tsx`, model `commandPaletteModel.ts`, plus a "Search Ctrl K" button in the top bar): jump to any page, any computer (by name, IP, user, OS or OU) or common action (Run PowerShell, Starter scripts, Add a computer); keyboard navigation with arrows/Enter/Esc.
 - Tests: web 16/16 (new: software model 3, activity filter 2, starter scripts 2 incl. real PowerShell parse, command palette 2) and production build. Browser QA against a local server and real agent: OU search "cody staff" finds the computer; starter script added to the library and run end to end (15-minute timeout, printer table returned); software search/expand; Activity filters.
 - **Fleet health panel** on the Overview (`FleetHealth.tsx`, model `fleetHealthModel.ts`): offline for over a day, low disk (<10% or <10 GB free), waiting for a restart, agent older than the version the website serves, not restarted in 30+ days. Each group expands to the affected computers (click to open) with advice and a one-click next step: restart dialog pre-filled with those computers, "Clean temp files" starter script pre-filled, or an inventory refresh for offline ones. Tests: fleet health model 2/2 (web total 18/18).
+
+## 2026-11-05 — Merged and deployed
+
+- With the user's approval, PR #2 (endpoint terminal, AD inventory, multi-monitor, support policy; agent/companion 0.1.7) and PR #3 (fleet QoL tools) were merged to main (`a055401`). Main CI passed (server-web, agent, container).
+- Production `/api/health` reports `a0554015…`; `/api/agent-download` serves agent 0.1.7. Endpoints update on their next service start.
+- Still unverified on real endpoints: service-context terminal, multi-monitor capture/input, hidden-indicator support mode.
