@@ -32,6 +32,12 @@ Account schema v2 adds email, role and disabled fields in an additive transactio
 
 GitHub Actions builds an image in GHCR. The initial host update service uses a separate read-only deploy key to fetch private GitHub `main` and build a commit-tagged local image, preserving data and restarting only this stack after health checks. This avoids storing broad GitHub PAT/GHCR credentials on the shared host. Admin UI requests updates via a narrowly scoped authenticated update helper; Docker socket is never exposed to the web container. The helper and Compose config are reviewed host files outside the auto-updated checkout. Pending/running jobs are never requeued during upgrades. A failed revision is not automatically retried until a new commit arrives; manual retry is explicit.
 
+### Agent updater evidence — schema9
+
+Agents0.1.8+ send structured updater status through ordinary checkin and a dedicated bearer-authenticated `/api/agent/update-status` path, allowing startup progress before inventory or jobs begin. This evidence is separate from inventory. Missing telemetry from an older agent remains explicitly unknown; the server never diagnoses a failed update from version age alone. Endpoint receipt time uses the server clock, while updater event timestamps retain the agent's reported time.
+
+Only a closed versioned schema with bounded versions/timestamps/counts, known phases/stages/error codes, SHA256 and fixed safe summaries is accepted. Unknown properties and arbitrary exception/transcript text are rejected before atomic heartbeat/report storage. Latest status and at most100 semantic transitions per endpoint live in additive schema9; timestamp-only heartbeats do not append history. Failure audit contains safe metadata only. Updater-history pruning is isolated from durable jobs, output and consumed execution grants. Read-only fleet/endpoint views expose evidence to existing roles; telemetry has no command-execution authority. See `HANDOFF-UPDATE-SERVER.md` for contracts and verification.
+
 ## Scope boundaries
 
 Agent distribution is hosted by the app: `/install.ps1`, a public x64 ZIP, and public checksum/metadata. The Docker build cross-publishes the self-contained Windows service and packages the existing administrator installer. Public artifacts contain no enrollment token. An authenticated operator creates a token separately and the installer prompts securely. The bootstrap verifies HTTPS metadata/package SHA256 before extraction; it supports download-only validation without installing a service.

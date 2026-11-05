@@ -101,6 +101,18 @@ export function openDatabase(filename) {
     if (!supportColumns.has('show_session_details')) db.exec('ALTER TABLE support_sessions ADD COLUMN show_session_details INTEGER NOT NULL DEFAULT 1');
     db.exec('PRAGMA user_version=8;');
   });
+  // v9: structured agent updater evidence is separate from inventory and jobs.
+  // Only bounded safe reports are stored; history retention never touches output.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS endpoint_update_status (
+        endpoint_id TEXT PRIMARY KEY REFERENCES endpoints(id), report_json TEXT NOT NULL,
+        transition_hash TEXT NOT NULL, received_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS endpoint_update_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id TEXT NOT NULL REFERENCES endpoints(id),
+        report_json TEXT NOT NULL, transition_hash TEXT NOT NULL, received_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS endpoint_update_history_endpoint ON endpoint_update_history(endpoint_id,id DESC);
+      PRAGMA user_version=9;`);
+  });
   return db;
 }
 

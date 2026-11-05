@@ -17,6 +17,7 @@ public static class SupportLauncher
 {
     private static readonly SemaphoreSlim LaunchGate = new(1, 1);
     private static SupportLease? active;
+    public static bool HasActiveSession => active is { Finished: false };
 
     public static async Task<SupportLaunchResult> LaunchAsync(AgentConfiguration configuration, AgentApi api, AgentJob job, CancellationToken serviceStopping)
     {

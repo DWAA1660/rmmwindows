@@ -61,6 +61,8 @@ import { StarterScripts } from './StarterScripts';
 import { filterActivity, isBrowsingJob } from './activityFilter';
 import { CommandPalette } from './CommandPalette';
 import { FleetHealth } from './FleetHealth';
+import { AgentUpdateHealth, AgentUpdateDetails } from './AgentUpdateHealth';
+import type { AgentUpdateStatus } from './agentUpdateHealthModel';
 import { scriptTemplates } from './scriptTemplates';
 import type { PaletteItem } from './commandPaletteModel';
 
@@ -98,6 +100,7 @@ type Inventory = {
   directory?: { canonicalName?: string | null; organizationalUnits?: string[] } | null;
 };
 type Endpoint = {
+  updateStatus?: AgentUpdateStatus | null;
   groupId?: string;
   groupName?: string;
   id: string;
@@ -1303,6 +1306,7 @@ function App() {
                   footer={`${jobs.filter((j) => j.status === "succeeded").length} completed successfully`}
                 />
               </div>
+              <AgentUpdateHealth endpoints={active} request={api} onOpenEndpoint={id=>{const ep=endpoints.find(item=>item.id===id);if(ep)setDetail(ep);}}/>
               <FleetHealth
                 endpoints={active}
                 request={api}
@@ -2495,6 +2499,7 @@ function App() {
                   value={detail.inventory?.architecture}
                 />
               </div>
+              <AgentUpdateDetails status={detail.updateStatus} agentVersion={detail.inventory?.agentVersion}/>
               <EndpointDirectory inventory={detail.inventory}/>
               <div className="detail-section-title">
                 <h3>Disks & storage</h3>

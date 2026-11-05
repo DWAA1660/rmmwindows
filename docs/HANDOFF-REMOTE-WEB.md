@@ -1,5 +1,9 @@
 # Remote support browser handoff — 2026-11-04
 
+## 2026-11-05 status checkpoint
+
+Latest policy remains independent approval/indicator toggles including both off; dual-monitor contracts below remain current. Coordinator/Claude subsequently added and passed server tests for all four policy combinations, immutable snapshots, version gates, known display validation and fail-closed switching (see PROGRESS.md). PR#2 and the QoL PR#3 were merged/deployed to main `a055401` with agent0.1.7, per the coordinator's deployment record. Earlier schema7/agent0.1.6 paragraphs below are historical verification, not the current feature release. Real service-context multi-monitor capture/input, hidden-indicator lifecycle and protected/sign-in desktop control remain unverified; the last item is not implemented.
+
 ## Delivered
 
 - `web/src/RemoteSupport.tsx` exports `RemoteSupport()` with no required props and `openRemoteSupport(endpointId)` for the endpoint button. The opener runs synchronously from the user's click, opens a dedicated resizable support window, and nulls its opener reference.

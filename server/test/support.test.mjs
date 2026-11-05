@@ -254,7 +254,7 @@ test('support policy persists across full app/database reopen', async t => {
   await t.test('reload', async child => {
     const f = await fixture(child, { databasePath: filename });
     assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, { approvalRequired: false, approvalSeconds: 300, showSessionDetails: true });
-    assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 8);
+    assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 9);
   });
 });
 

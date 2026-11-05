@@ -19,7 +19,7 @@ export function FleetHealth({ endpoints, request, canAct, onOpenEndpoint, onRebo
   const action = (issue: HealthIssue) => {
     const ids = issue.endpoints.map(endpoint => endpoint.id);
     if (!canAct) return null;
-    if (issue.key === 'reboot' || issue.key === 'uptime' || issue.key === 'agent')
+    if (issue.key === 'reboot' || issue.key === 'uptime')
       return <button type="button" className="button small secondary" onClick={() => onReboot(ids)}><Power size={13} /> Restart these…</button>;
     if (issue.key === 'disk') return <button type="button" className="button small secondary" onClick={() => onCleanDisk(ids)}><HardDrive size={13} /> Clean temp files…</button>;
     if (issue.key === 'offline') return <button type="button" className="button small secondary" onClick={() => onRefreshInventory(ids)}><RefreshCw size={13} /> Queue inventory refresh</button>;
