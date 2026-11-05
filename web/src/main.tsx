@@ -50,6 +50,8 @@ import { JoinRequests, type JoinRequest } from './JoinRequests';
 import { EndpointPicker } from './EndpointPicker';
 import { BatchResults } from './BatchResults';
 import { FileExplorer } from './FileExplorer';
+import { RemoteSupport, openRemoteSupport } from './RemoteSupport';
+import { SupportSettings } from './SupportSettings';
 
 type Disk = {
   name: string;
@@ -1987,7 +1989,9 @@ function App() {
             </section>
           )}
           {view === "settings" && (
-            <><AccountSettings user={user} request={api} onProfile={setUser}/><div className="settings-grid">
+            <><AccountSettings user={user} request={api} onProfile={setUser}/>
+            {user.role === 'admin' && <SupportSettings request={api} onError={fail}/>}
+            <div className="settings-grid">
               <section className="panel settings-card">
                 <div className="settings-card-heading">
                   <span className="settings-icon">
@@ -2148,13 +2152,15 @@ function App() {
                     </span>
                     <div>
                       <h2>Remote assistance</h2>
-                      <p>Planned for a later release</p>
+                      <p>Browser support for signed-in desktops</p>
                     </div>
                   </div>
                   <p>
-                    Screen viewing requires a companion in the user’s desktop
-                    session, explicit consent, and a persistent visible sharing
-                    indicator. Screen control is not available.
+                    Open an endpoint and choose Remote support to view its primary
+                    screen and control the visible mouse and keyboard. Agent 0.1.6
+                    or newer is required. The sharing indicator stays visible;
+                    Ctrl+Alt+Shift+F12 ends sharing locally. Windows sign-in and
+                    protected screens cannot currently be viewed or controlled.
                   </p>
                 </section>
               </div>
@@ -2202,6 +2208,21 @@ function App() {
             <span className="mono">{detail.id.slice(0, 8)}</span>
           </div>
           <div className="detail-actions">
+            {user.role !== 'viewer' && <button
+              className="button primary small"
+              disabled={detail.revoked || !detail.online}
+              onClick={() => {
+                const version = detail.inventory?.agentVersion?.split('.').map(Number);
+                if (!version || version.length !== 3 || version.some(n=>!Number.isInteger(n)) ||
+                    (version[0] === 0 && version[1] === 1 && version[2] < 6) ||
+                    (version[0] === 0 && version[1] < 1)) {
+                  fail(new Error('Remote support needs agent 0.1.6 or newer. Restart the agent service when no jobs are running, or re-run the website installer to update.'));
+                  return;
+                }
+                openRemoteSupport(detail.id);
+              }}>
+              <Monitor size={15} /> Remote support
+            </button>}
             <button
               className="button primary small"
               disabled={detail.revoked}
@@ -3464,4 +3485,6 @@ function AgentInstaller() {
   </section>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  window.location.pathname.startsWith('/support/') ? <RemoteSupport /> : <App />
+);

@@ -176,6 +176,16 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     await journal.CompleteAsync(new JobCompletion(outcome.Status, outcome.ExitCode, outcome.Summary));
                     break;
                 }
+                case "remote_support":
+                {
+                    // Reaches the launcher only after the same durable start authorization as
+                    // every command. This job reports launch; the separately scoped live session
+                    // ends on staff refusal, expiry, disconnect or service cancellation.
+                    var launched = await SupportLauncher.LaunchAsync(configuration, api, job, ct);
+                    await journal.AppendAsync("system", "Staff notification launched. Remote support remains visible and can be declined; no job will be replayed.\n");
+                    await journal.CompleteAsync(new JobCompletion("succeeded", 0, "Remote support notification launched; inspect the support window for session status."));
+                    break;
+                }
                 case "reboot":
                 {
                     var delay = job.Payload.TryGetProperty("delaySeconds", out var delayValue) && delayValue.TryGetInt32(out var seconds) ? seconds : 60;

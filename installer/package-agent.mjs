@@ -11,7 +11,8 @@ if (!version || !/^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.-]+)?$/.test(version)) throw n
 const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 mkdirSync(output, { recursive: true });
 writeFileSync(join(stage, 'package-manifest.json'), JSON.stringify({ version, runtime: 'win-x64',
-  agentSha256: digest(join(stage, 'agent/LibraryRmm.Agent.exe')), builtAtUtc: new Date().toISOString() }));
+  agentSha256: digest(join(stage, 'agent/LibraryRmm.Agent.exe')),
+  companionSha256: digest(join(stage, 'agent/companion/LibraryRmm.Support.exe')), builtAtUtc: new Date().toISOString() }));
 const archive = join(output, 'library-rmm-agent-win-x64.zip');
 execFileSync('zip', ['-q', '-r', archive, '.'], { cwd: stage });
 const manifest = { version, runtime: 'win-x64', sha256: digest(archive) };
