@@ -189,6 +189,39 @@ try {
   assert.ok(received.equals(payloadBytes), 'downloaded bytes match the file on the endpoint');
   assert.equal(file.headers.get('x-content-sha256'), fetched.result.sha256);
   console.log(`PASS file explorer: list (picked up in ${listed.pickedUpMs} ms), drives, copy, mkdir, per-item delete, protected refusal, ${payloadBytes.length}-byte download identical.`);
+
+  phase('Persistent terminal: state across separate authorized jobs, then explicit close while running.');
+  const terminal = await api('/terminals', { method:'POST',body:{endpointId:enrolled.endpointId,idempotencyKey:randomUUID()} });
+  const command = text => api(`/terminals/${terminal.id}/commands`, {method:'POST',body:{command:text,idempotencyKey:randomUUID(),timeoutSeconds:60}});
+  async function finishedTerminal(id) {
+    let state;
+    const deadline = Date.now()+45000;
+    while(Date.now()<deadline) {
+      state=await api(`/jobs/${id}`);
+      if(['succeeded','failed','interrupted','cancelled'].includes(state.status)) break;
+      await new Promise(r=>setTimeout(r,200));
+    }
+    let after=-1, more=true, stdout='';
+    while(more) { const page=await api(`/jobs/${id}/output?after=${after}&limit=100`); stdout+=page.chunks.filter(c=>c.stream==='stdout').map(c=>c.text).join(''); after=page.nextCursor;more=page.hasMore; }
+    return {state,stdout};
+  }
+  const targetDirectory=sample.replaceAll("'","''");
+  const firstTerminal=await command(`$persisted=12345; function Read-Persisted { 'saved-function' }; Set-Location '${targetDirectory}'; 'terminal-one'`);
+  const one=await finishedTerminal(firstTerminal.id); assert.equal(one.state.status,'succeeded',one.state.summary+logs);
+  const secondTerminal=await command('"$persisted $(Read-Persisted)"; $PWD.Path; [Console]::Write("terminal-α中文🙂")');
+  const two=await finishedTerminal(secondTerminal.id); assert.equal(two.state.status,'succeeded',two.state.summary+logs);
+  assert.ok(two.stdout.includes('12345 saved-function') && two.stdout.includes(sample) && two.stdout.endsWith('terminal-α中文🙂'),two.stdout);
+  assert.equal((await api(`/terminals/${terminal.id}`)).workingDirectory,sample);
+  const waiting=await command("[Console]::Write('terminal-waiting'); Start-Sleep -Seconds 40");
+  const untilRunning=Date.now()+10000;
+  while(Date.now()<untilRunning) { if((await api(`/jobs/${waiting.id}`)).status==='running')break; await new Promise(r=>setTimeout(r,100)); }
+  await new Promise(r=>setTimeout(r,500));
+  await api(`/terminals/${terminal.id}/close`,{method:'POST',body:{}});
+  const closed=await finishedTerminal(waiting.id); assert.equal(closed.state.status,'interrupted',closed.state.summary);
+  assert.ok(closed.stdout.includes('terminal-waiting'),'Partial command output retained after closing');
+  assert.equal((await api(`/terminals/${terminal.id}`)).status,'closed');
+  assert.equal((await api('/agent/jobs/claim',{method:'POST',body:{},agentToken:enrolled.agentToken})).job,null,'Terminal commands never re-dispatch');
+  console.log('PASS real persistent terminal/API: variables/functions/cwd retained across jobs, Unicode output retained, close kills running shell with partial output and no replay.');
 } finally {
   phase('Stopping isolated agent and API.');
   if (child && child.exitCode === null) {

@@ -35,5 +35,6 @@ builder.Services.AddSingleton<AgentApi>();
 builder.Services.AddSingleton<OutputSpool>();
 builder.Services.AddSingleton<PowerShellRunner>();
 builder.Services.AddSingleton<InventoryCollector>();
+builder.Services.AddSingleton<TerminalManager>();
 builder.Services.AddHostedService<AgentWorker>();
 await builder.Build().RunAsync();

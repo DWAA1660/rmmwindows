@@ -8,6 +8,7 @@ import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
 import { mountGroups } from './groups.mjs';
 import { mountSupport } from './support.mjs';
+import { mountTerminal } from './terminals.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
@@ -63,6 +64,48 @@ function canonicalInventory(input, previousHostname) {
     if (!object(item)) fail(400, 'Each software entry must be an object.');
     return { name: str(item.name, 'software.name', { max: 1000 }), version: text(item.version, 'software.version', 300, ''), publisher: text(item.publisher, 'software.publisher', 1000, ''), installDate: text(item.installDate, 'software.installDate', 100, '') };
   });
+  // Additive diagnostics: old agents remain valid and unavailable data stays
+  // unknown. Whitelist each nested field rather than persisting arbitrary data.
+  const optionalObject = (value, name) => {
+    if (value === null || value === undefined) return null;
+    if (!object(value)) fail(400, `${name} must be an object or null.`);
+    return value;
+  };
+  const nullableBoolean = (value, name) => value === null || value === undefined ? null : bool(value, name);
+  const strings = (value, name, count, max) => array(value, name, count).map(item => str(item, name, { max }));
+  const directoryInput = optionalObject(input.directory, 'inventory.directory');
+  const directory = directoryInput === null ? null : {
+    distinguishedName: text(directoryInput.distinguishedName, 'directory.distinguishedName', 4096),
+    canonicalName: text(directoryInput.canonicalName, 'directory.canonicalName', 4096),
+    organizationalUnits: strings(directoryInput.organizationalUnits, 'directory.organizationalUnits', 64, 512),
+    domainController: text(directoryInput.domainController, 'directory.domainController', 512),
+    site: text(directoryInput.site, 'directory.site', 512),
+    error: text(directoryInput.error, 'directory.error', 1000)
+  };
+  const hardwareInput = optionalObject(input.hardware, 'inventory.hardware');
+  const hardware = hardwareInput === null ? null : {
+    manufacturer: text(hardwareInput.manufacturer, 'hardware.manufacturer', 256),
+    model: text(hardwareInput.model, 'hardware.model', 512),
+    serialNumber: text(hardwareInput.serialNumber, 'hardware.serialNumber', 256),
+    biosVersion: text(hardwareInput.biosVersion, 'hardware.biosVersion', 512)
+  };
+  const networkAdapters = array(input.networkAdapters, 'inventory.networkAdapters', 128).map(adapter => {
+    if (!object(adapter)) fail(400, 'Each network adapter must be an object.');
+    return {
+      name: text(adapter.name, 'networkAdapter.name', 512),
+      mac: text(adapter.mac, 'networkAdapter.mac', 100),
+      ipv4: strings(adapter.ipv4, 'networkAdapter.ipv4', 128, 100),
+      gateways: strings(adapter.gateways, 'networkAdapter.gateways', 128, 100),
+      dnsServers: strings(adapter.dnsServers, 'networkAdapter.dnsServers', 128, 100),
+      dhcpEnabled: nullableBoolean(adapter.dhcpEnabled, 'networkAdapter.dhcpEnabled')
+    };
+  });
+  let inventoryCollectedAt = null;
+  if (input.inventoryCollectedAt !== null && input.inventoryCollectedAt !== undefined) {
+    const collected = str(input.inventoryCollectedAt, 'inventory.inventoryCollectedAt', { max: 64 });
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/.test(collected)) fail(400, 'inventory.inventoryCollectedAt must be an ISO timestamp with a timezone.');
+    inventoryCollectedAt = date(collected, 'inventory.inventoryCollectedAt');
+  }
   return {
     hostname: str(input.hostname, 'inventory.hostname', { max: 200, fallback: previousHostname }),
     osName: text(input.osName, 'inventory.osName', 300), osVersion: text(input.osVersion, 'inventory.osVersion', 200),
@@ -71,7 +114,12 @@ function canonicalInventory(input, previousHostname) {
     ipv4: array(input.ipv4, 'inventory.ipv4', 128).map(ip => str(ip, 'IP address', { max: 100 })),
     loggedOnUser: text(input.loggedOnUser, 'inventory.loggedOnUser', 500), bootTime: input.bootTime === null || input.bootTime === undefined ? null : date(input.bootTime, 'inventory.bootTime'),
     cpuPercent: number(input.cpuPercent, 'inventory.cpuPercent', 100, false), memoryTotalBytes: number(input.memoryTotalBytes, 'inventory.memoryTotalBytes'), memoryUsedBytes: number(input.memoryUsedBytes, 'inventory.memoryUsedBytes'),
-    agentVersion: text(input.agentVersion, 'inventory.agentVersion', 100), disks, software
+    agentVersion: text(input.agentVersion, 'inventory.agentVersion', 100), disks, software,
+    directory, hardware, networkAdapters,
+    pendingReboot: nullableBoolean(input.pendingReboot, 'inventory.pendingReboot'),
+    pendingRebootReasons: strings(input.pendingRebootReasons, 'inventory.pendingRebootReasons', 64, 512),
+    uptimeSeconds: number(input.uptimeSeconds, 'inventory.uptimeSeconds', Number.MAX_SAFE_INTEGER, false),
+    inventoryCollectedAt
   };
 }
 
@@ -344,6 +392,8 @@ export function createApp(options = {}) {
     maxFileBytes: options.maxFileBytes, maxTotalBytes: options.maxTotalFileBytes, retentionMs: options.fileRetentionMs });
   const support = mountSupport({ db, audit, fail, str, insertJob, publicOrigin, validationIntervalMs: options.supportValidationIntervalMs });
   support.mountAgent(agentRouter);
+  const terminals = mountTerminal({ db, audit, fail, str, insertJob, jobView, getJob });
+  terminals.mountAgent(agentRouter);
   files.mountAgent(agentRouter);
   app.use('/api/agent', agentRouter);
 
@@ -538,6 +588,7 @@ export function createApp(options = {}) {
     const result = await updateRequest('POST', '/update'); res.status(202).json(result);
   });
   support.mountConsole(admin);
+  terminals.mountConsole(admin);
   mountJoinConsole(admin);
   files.mountConsole(admin);
   app.use('/api', admin);
@@ -586,5 +637,5 @@ export function createApp(options = {}) {
   // Answer every held long-poll claim with {job:null} (used on shutdown so the listener can close).
   const releaseClaimWaiters = () => { for (const finish of [...claimWaiters]) finish(); };
   return { app, db, tickSchedules, releaseClaimWaiters, attachSupport: support.attach, stopSupport: support.shutdown, cleanupFiles: files.cleanup,
-    close: () => { support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
+    close: () => { terminals.shutdown(); support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
 }

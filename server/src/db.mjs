@@ -80,6 +80,27 @@ export function openDatabase(filename) {
     if (!supportColumns.has('approval_seconds')) db.exec('ALTER TABLE support_sessions ADD COLUMN approval_seconds INTEGER NOT NULL DEFAULT 15');
     db.exec('PRAGMA user_version=7;');
   });
+  // v8: persistent PowerShell terminal sessions. Session/process lifetime is
+  // separate from immutable per-command jobs; authorization is consumed once.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS terminal_sessions (
+        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL REFERENCES endpoints(id),
+        operator_id TEXT NOT NULL REFERENCES users(id), operator_session_hash TEXT NOT NULL,
+        operator_name TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','closed')),
+        instance_id TEXT, working_directory TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+        closed_at TEXT, close_reason TEXT, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+        UNIQUE(operator_session_hash,idempotency_key));
+      CREATE INDEX IF NOT EXISTS terminal_endpoint_status ON terminal_sessions(endpoint_id,status);
+      CREATE TABLE IF NOT EXISTS terminal_commands (
+        terminal_id TEXT NOT NULL REFERENCES terminal_sessions(id), job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+        idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, authorized_at TEXT,
+        UNIQUE(terminal_id,idempotency_key));`);
+    const settingColumns = new Set(db.prepare('PRAGMA table_info(support_settings)').all().map(column => column.name));
+    const supportColumns = new Set(db.prepare('PRAGMA table_info(support_sessions)').all().map(column => column.name));
+    if (!settingColumns.has('show_session_details')) db.exec('ALTER TABLE support_settings ADD COLUMN show_session_details INTEGER NOT NULL DEFAULT 1');
+    if (!supportColumns.has('show_session_details')) db.exec('ALTER TABLE support_sessions ADD COLUMN show_session_details INTEGER NOT NULL DEFAULT 1');
+    db.exec('PRAGMA user_version=8;');
+  });
   return db;
 }
 

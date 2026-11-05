@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 namespace LibraryRmm.Agent;
 
 public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, OutputSpool spool,
-    PowerShellRunner runner, InventoryCollector inventory, ILogger<AgentWorker> logger) : BackgroundService
+    PowerShellRunner runner, InventoryCollector inventory, TerminalManager terminals, ILogger<AgentWorker> logger) : BackgroundService
 {
     internal const int ClaimWaitSeconds = 20;
 
@@ -59,6 +59,7 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         finally
         {
+            terminals.Dispose();
             try { await Task.WhenAll(heartbeat, uploads); } catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         }
     }
@@ -140,6 +141,12 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
             await journal.AppendAsync("system", $"Execution authorized for {job.Kind} at {DateTimeOffset.UtcNow:O}.\n");
             switch (job.Kind)
             {
+                case "terminal":
+                {
+                    var result = await terminals.ExecuteAsync(job, journal.AppendAsync, timeout, ct);
+                    await CompleteProcessAsync(journal, result, "Terminal command completed; PowerShell session state is retained.");
+                    break;
+                }
                 case "powershell":
                 {
                     var script = RequiredString(job.Payload, "script", 1024 * 1024);

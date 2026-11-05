@@ -207,19 +207,19 @@ test('failed launch, launch deadline and process restart terminate sessions and 
 
 test('admin support policy validates and audits settings while session and claim keep immutable policy snapshots', async t => {
   const f = await fixture(t); const a = await f.enroll(); const b = await f.enroll();
-  assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, { approvalRequired: true, approvalSeconds: 15 });
+  assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, { approvalRequired: true, approvalSeconds: 15, showSessionDetails: true });
   const old = (await f.create(a)).data; assert.equal(old.approvalRequired, true); assert.equal(old.approvalSeconds, 15);
   for (const body of [ {}, { approvalRequired: false }, { approvalRequired: 0, approvalSeconds: 15 },
     { approvalRequired: true, approvalSeconds: 0 }, { approvalRequired: true, approvalSeconds: 301 },
     { approvalRequired: true, approvalSeconds: 1.5 }, { approvalRequired: true, approvalSeconds: '15' },
     { approvalRequired: true, approvalSeconds: 15, extra: true } ])
     assert.equal((await f.request('/settings/support', 'PATCH', body, f.admin)).status, 400);
-  const next = { approvalRequired: false, approvalSeconds: 27 };
+  const next = { approvalRequired: false, approvalSeconds: 27, showSessionDetails: true };
   assert.equal((await f.request('/settings/support', 'PATCH', next, { Cookie: f.admin.Cookie })).status, 403);
   assert.equal((await f.request('/settings/support', 'PATCH', next, f.admin, { Origin: 'http://evil.test' })).status, 403);
   assert.deepEqual((await f.request('/settings/support', 'PATCH', next, f.admin)).data, next);
   const audit = JSON.parse(f.db.prepare("SELECT details FROM audit WHERE action='support.settings.updated'").get().details);
-  assert.deepEqual(audit, { previous: { approvalRequired: true, approvalSeconds: 15 }, next });
+  assert.deepEqual(audit, { previous: { approvalRequired: true, approvalSeconds: 15, showSessionDetails: true }, next });
   const oldView = (await f.request(`/support/sessions/${old.id}`, 'GET', undefined, f.admin)).data;
   assert.equal(oldView.approvalRequired, true); assert.equal(oldView.approvalSeconds, 15);
   const oldGrant = await f.launch(a, old); assert.equal(oldGrant.approvalRequired, true); assert.equal(oldGrant.approvalSeconds, 15);
@@ -253,8 +253,8 @@ test('support policy persists across full app/database reopen', async t => {
   });
   await t.test('reload', async child => {
     const f = await fixture(child, { databasePath: filename });
-    assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, { approvalRequired: false, approvalSeconds: 300 });
-    assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 7);
+    assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, { approvalRequired: false, approvalSeconds: 300, showSessionDetails: true });
+    assert.equal(f.db.prepare('PRAGMA user_version').get().user_version, 8);
   });
 });
 
@@ -298,4 +298,87 @@ test('native secure-attention relay requires capability, staff control, live con
   const viewOnlyId = randomUUID(); viewer.send(JSON.stringify({ type: 'secureAttention', requestId: viewOnlyId }));
   await until(() => viewer.messages.some(m => m.requestId === viewOnlyId && m.success === false), 'view-only SAS denied');
   assert.ok(!viewDevice.messages.some(m => m.type === 'secureAttention'));
+});
+
+test('session-details policy is independent of approval (all four combinations), snapshotted per session, and requires agent 0.1.7 when hidden', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('/settings/support', 'PATCH', { approvalRequired: true, approvalSeconds: 15, showSessionDetails: 'no' }, f.admin)).status, 400);
+  for (const approvalRequired of [true, false]) for (const showSessionDetails of [true, false]) {
+    const body = { approvalRequired, approvalSeconds: 12, showSessionDetails };
+    assert.deepEqual((await f.request('/settings/support', 'PATCH', body, f.admin)).data, body);
+    assert.deepEqual((await f.request('/settings/support', 'GET', undefined, f.admin)).data, body);
+  }
+  // Both off is now stored. Omitting showSessionDetails (older clients) keeps the stored choice.
+  assert.equal((await f.request('/settings/support', 'PATCH', { approvalRequired: false, approvalSeconds: 9 }, f.admin)).data.showSessionDetails, false);
+  const refused = await f.create(await f.enroll('0.1.6'));
+  assert.equal(refused.status, 409); assert.match(refused.data.error, /0\.1\.7/);
+  const modern = await f.enroll('0.1.7');
+  const hidden = (await f.create(modern)).data;
+  assert.equal(hidden.showSessionDetails, false); assert.equal(hidden.approvalRequired, false);
+  const grant = await f.launch(modern, hidden);
+  assert.equal(grant.showSessionDetails, false); assert.equal(grant.approvalRequired, false);
+  await f.request('/settings/support', 'PATCH', { approvalRequired: true, approvalSeconds: 15, showSessionDetails: true }, f.admin);
+  assert.equal((await f.request(`/support/sessions/${hidden.id}`, 'GET', undefined, f.admin)).data.showSessionDetails, false, 'existing session keeps its snapshot');
+  const visible = (await f.create(await f.enroll('0.1.6'))).data;
+  assert.equal(visible.showSessionDetails, true, 'old agents still work while the indicator is on');
+  const audits = f.db.prepare("SELECT details FROM audit WHERE action='support.settings.updated'").all().map(row => JSON.parse(row.details).next);
+  assert.ok(audits.some(next => next.approvalRequired === false && next.showSessionDetails === false), 'both-off change audited');
+});
+
+test('monitor selection validates displays, pauses frames and input while switching, and resumes only on matching metadata', async t => {
+  const f = await fixture(t);
+  const displays = [{ id: 'DISPLAY1', name: 'Primary', width: 1920, height: 1080, isPrimary: true }, { id: 'DISPLAY2', name: 'Left', width: 1280, height: 1024, isPrimary: false }];
+  const start = async () => {
+    const endpoint = await f.enroll('0.1.7'); const session = (await f.create(endpoint)).data; const grant = await f.launch(endpoint, session);
+    const browser = (await f.browser(session)).ws; const dev = (await f.device(session, grant)).ws;
+    dev.send(JSON.stringify({ type: 'consent', approved: true, control: true, userName: 'TEST\\Staff', decision: 'automatic' }));
+    await until(() => browser.messages.some(m => m.session?.status === 'active'), 'active');
+    return { browser, dev, status: () => f.db.prepare('SELECT status,end_reason FROM support_sessions WHERE id=?').get(session.id) };
+  };
+  const advertised = async s => {
+    s.dev.send(JSON.stringify({ type: 'displays', displays }));
+    await until(() => s.browser.messages.some(m => m.type === 'displays' && m.displays.length === 2), 'display list reaches the browser');
+  };
+  const s = await start(); await advertised(s);
+  s.dev.send(JSON.stringify({ type: 'display', id: 'DISPLAY1', width: 1920, height: 1080 })); s.dev.send(jpeg);
+  await until(() => s.browser.messages.some(Buffer.isBuffer), 'first monitor frame');
+  s.browser.send(JSON.stringify({ type: 'selectDisplay', displayId: 'DISPLAY2' }));
+  await until(() => s.dev.messages.some(m => m.type === 'selectDisplay' && m.displayId === 'DISPLAY2'), 'selection forwarded');
+  assert.ok(s.dev.messages.some(m => m.action === 'releaseAll'), 'held keys released before switching');
+  await until(() => s.browser.messages.some(m => m.paused === true), 'browser told the stream is paused');
+  const frames = s.browser.messages.filter(Buffer.isBuffer).length;
+  const inputs = () => s.dev.messages.filter(m => m.type === 'input' && m.action !== 'releaseAll').length;
+  const before = inputs();
+  s.dev.send(jpeg); s.browser.send(JSON.stringify({ type: 'input', action: 'move', x: .5, y: .5 }));
+  await delay(60);
+  assert.equal(s.browser.messages.filter(Buffer.isBuffer).length, frames, 'no frames while switching');
+  assert.equal(inputs(), before, 'no input while switching');
+  s.dev.send(JSON.stringify({ type: 'display', id: 'DISPLAY2', width: 1280, height: 1024 }));
+  s.dev.send(JSON.stringify({ type: 'paused', paused: false }));
+  await until(() => s.browser.messages.at(-1)?.paused === false, 'resumed after matching metadata');
+  assert.ok(s.browser.messages.some(m => m.type === 'display' && m.id === 'DISPLAY2' && m.width === 1280));
+  s.dev.send(jpeg); await until(() => s.browser.messages.filter(Buffer.isBuffer).length > frames, 'frames flow again');
+  s.browser.send(JSON.stringify({ type: 'input', action: 'move', x: .25, y: .25 }));
+  await until(() => s.dev.messages.some(m => m.type === 'input' && m.action === 'move' && m.x === .25), 'input flows again');
+  assert.ok(f.db.prepare("SELECT count(*) n FROM audit WHERE action='support.display.selected'").get().n >= 1, 'monitor switch audited');
+
+  // Resuming before confirming the new monitor, confirming a different one, or choosing an
+  // unknown one all fail closed.
+  const early = await start(); await advertised(early);
+  early.browser.send(JSON.stringify({ type: 'selectDisplay', displayId: 'DISPLAY2' }));
+  await until(() => early.dev.messages.some(m => m.type === 'selectDisplay'), 'forwarded');
+  early.dev.send(JSON.stringify({ type: 'paused', paused: false }));
+  await until(() => early.status().end_reason === 'display_switch_unconfirmed', 'unconfirmed resume ends the session');
+  const mismatch = await start(); await advertised(mismatch);
+  mismatch.browser.send(JSON.stringify({ type: 'selectDisplay', displayId: 'DISPLAY2' }));
+  await until(() => mismatch.dev.messages.some(m => m.type === 'selectDisplay'), 'forwarded');
+  mismatch.dev.send(JSON.stringify({ type: 'display', id: 'DISPLAY1', width: 1920, height: 1080 }));
+  await until(() => mismatch.status().end_reason === 'display_switch_mismatch', 'wrong monitor ends the session');
+  const unknown = await start(); await advertised(unknown);
+  unknown.browser.send(JSON.stringify({ type: 'selectDisplay', displayId: 'NOT-A-DISPLAY' }));
+  await until(() => unknown.status().end_reason === 'invalid_display_selection', 'unknown monitor selection ends the session');
+  for (const bad of [[], Array.from({ length: 17 }, (_, i) => ({ ...displays[0], id: 'D' + i })), [displays[0], displays[0]], [{ ...displays[0], width: 0 }]]) {
+    const session = await start(); session.dev.send(JSON.stringify({ type: 'displays', displays: bad }));
+    await until(() => session.status().end_reason === 'invalid_displays', 'invalid display advertisement ends the session');
+  }
 });

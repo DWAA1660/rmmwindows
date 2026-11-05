@@ -52,6 +52,8 @@ import { BatchResults } from './BatchResults';
 import { FileExplorer } from './FileExplorer';
 import { RemoteSupport, openRemoteSupport } from './RemoteSupport';
 import { SupportSettings } from './SupportSettings';
+import { EndpointDirectory } from './EndpointDirectory';
+import { TerminalConsole } from './TerminalConsole';
 
 type Disk = {
   name: string;
@@ -509,6 +511,7 @@ function App() {
   const [jobDetail, setJobDetail] = useState<Job | null>(null),
     [batch, setBatch] = useState<Job[] | null>(null),
     [explorer, setExplorer] = useState<Endpoint | null>(null),
+    [terminalEndpoint, setTerminalEndpoint] = useState<Endpoint | null>(null),
     [command, setCommand] = useState<{
       ids: string[];
       kind: string;
@@ -2227,12 +2230,12 @@ function App() {
               className="button primary small"
               disabled={detail.revoked}
               onClick={() => {
-                openCommand("powershell", [detail.id]);
+                setTerminalEndpoint(detail);
                 setDetail(null);
               }}
             >
               <Terminal size={15} />
-              PowerShell
+              Terminal
             </button>
             <button
               className="button secondary small"
@@ -2330,6 +2333,7 @@ function App() {
                   value={detail.inventory?.architecture}
                 />
               </div>
+              <EndpointDirectory inventory={detail.inventory}/>
               <div className="detail-section-title">
                 <h3>Disks & storage</h3>
                 <button
@@ -2871,6 +2875,7 @@ function App() {
           )}
         </Modal>
       )}
+      {terminalEndpoint && user && <TerminalConsole endpoint={terminalEndpoint} request={api} onClose={()=>setTerminalEndpoint(null)} onError={fail}/>}
       {explorer && user && (
         <Modal
           title={`Files · ${endpointName(explorer)}`}

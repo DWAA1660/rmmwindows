@@ -43,6 +43,7 @@ export type SupportSession = {
   controlApproved: boolean;
   approvalRequired: boolean;
   approvalSeconds: number;
+  showSessionDetails: boolean;
   jobId?: string;
 };
 type SupportInput = {
@@ -54,6 +55,13 @@ type SupportInput = {
   deltaY?: number;
   key?: string;
 };
+type SupportDisplay = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+};
 type StreamMessage =
   | {
       type: "state";
@@ -61,7 +69,8 @@ type StreamMessage =
       paused?: boolean;
       reason?: string;
     }
-  | { type: "display"; width: number; height: number }
+  | { type: "display"; id?: string; width: number; height: number }
+  | { type: "displays"; displays: SupportDisplay[] }
   | { type: "capabilities"; secureAttention: boolean; secureDesktop: boolean }
   | {
       type: "secureAttentionResult";
@@ -153,6 +162,13 @@ export function RemoteSupport() {
   const [display, setDisplay] = useState({ width: 0, height: 0 }),
     [scale, setScale] = useState<"fit" | "actual">("fit"),
     [now, setNow] = useState(Date.now());
+  const [displays, setDisplays] = useState<SupportDisplay[]>([]),
+    [selectedDisplayId, setSelectedDisplayId] = useState(""),
+    [switchingDisplay, setSwitchingDisplay] = useState(false);
+  const activeDisplayId = useRef<string | null>(null),
+    requestedDisplayId = useRef<string | null>(null),
+    displaySwitchConfirmed = useRef(false),
+    displaySwitchResumed = useRef(false);
   const [secureAttentionAvailable, setSecureAttentionAvailable] =
       useState(false),
     [secureAttentionPending, setSecureAttentionPending] = useState(false),
@@ -249,6 +265,8 @@ export function RemoteSupport() {
     if (next.status !== "active") clearFrame();
     if (terminal(next.status)) {
       stopped.current = true;
+      requestedDisplayId.current = null;
+      setSwitchingDisplay(false);
       setSecureAttentionAvailable(false);
       setSecureAttentionPending(false);
       secureAttentionRequest.current = null;
@@ -356,12 +374,55 @@ export function RemoteSupport() {
               if (message.type === "state") {
                 const isPaused = message.paused === true;
                 currentPaused.current = isPaused;
+                if (requestedDisplayId.current)
+                  displaySwitchResumed.current = !isPaused;
                 setPaused(isPaused);
                 setPauseReason(message.reason || "");
                 acceptSession(message.session);
                 if (isPaused) {
                   disableControl();
                   clearFrame();
+                }
+              } else if (
+                message.type === "displays" &&
+                Array.isArray(message.displays)
+              ) {
+                const valid = message.displays.filter(
+                  (item) =>
+                    item &&
+                    typeof item.id === "string" &&
+                    item.id.length > 0 &&
+                    item.id.length <= 256 &&
+                    typeof item.name === "string" &&
+                    Number.isInteger(item.width) &&
+                    Number.isInteger(item.height) &&
+                    item.width > 0 &&
+                    item.height > 0 &&
+                    item.width <= 16384 &&
+                    item.height <= 16384,
+                );
+                const known = [
+                  ...new Map(valid.map((item) => [item.id, item])).values(),
+                ];
+                setDisplays(known);
+                setSelectedDisplayId((previous) =>
+                  known.some((item) => item.id === previous)
+                    ? previous
+                    : known.find((item) => item.isPrimary)?.id ||
+                      known[0]?.id ||
+                      "",
+                );
+                if (
+                  requestedDisplayId.current &&
+                  !known.some((item) => item.id === requestedDisplayId.current)
+                ) {
+                  requestedDisplayId.current = null;
+                  setSwitchingDisplay(false);
+                  disableControl();
+                  clearFrame();
+                  setError(
+                    "The selected monitor is no longer available. Choose an available monitor to start a new display switch.",
+                  );
                 }
               } else if (message.type === "capabilities") {
                 setSecureAttentionAvailable(message.secureAttention === true);
@@ -393,6 +454,17 @@ export function RemoteSupport() {
                 message.width <= 16384 &&
                 message.height <= 16384
               ) {
+                if (
+                  requestedDisplayId.current &&
+                  message.id !== requestedDisplayId.current
+                )
+                  return;
+                if (typeof message.id === "string" && message.id) {
+                  activeDisplayId.current = message.id;
+                  setSelectedDisplayId(message.id);
+                  if (message.id === requestedDisplayId.current)
+                    displaySwitchConfirmed.current = true;
+                }
                 setDisplay({ width: message.width, height: message.height });
               }
             } catch {
@@ -405,7 +477,10 @@ export function RemoteSupport() {
             event.data.size > 8 * 1024 * 1024 ||
             currentSession.current?.status !== "active" ||
             currentPaused.current ||
-            stopped.current
+            stopped.current ||
+            (requestedDisplayId.current &&
+              (!displaySwitchConfirmed.current ||
+                !displaySwitchResumed.current))
           )
             return;
           const sequence = ++frameSequence.current;
@@ -418,6 +493,9 @@ export function RemoteSupport() {
               currentSession.current?.status !== "active" ||
               currentPaused.current ||
               stopped.current ||
+              (requestedDisplayId.current &&
+                (!displaySwitchConfirmed.current ||
+                  !displaySwitchResumed.current)) ||
               !canvas.current
             )
               return;
@@ -436,7 +514,10 @@ export function RemoteSupport() {
             ) {
               surface.width = bitmap.width;
               surface.height = bitmap.height;
-              setDisplay({ width: bitmap.width, height: bitmap.height });
+              const dimensions = { width: bitmap.width, height: bitmap.height };
+              setDisplay((previous) =>
+                previous.width > 0 ? previous : dimensions,
+              );
             }
             surface.getContext("2d", { alpha: false })?.drawImage(bitmap, 0, 0);
             lastFrame.current = Date.now();
@@ -444,6 +525,10 @@ export function RemoteSupport() {
             setFrameAt(lastFrame.current);
             setStale(false);
             setHasFrame(true);
+            if (requestedDisplayId.current) {
+              requestedDisplayId.current = null;
+              setSwitchingDisplay(false);
+            }
           } catch {
             /* A failed JPEG decode never shows an old frame as a new one. */
           } finally {
@@ -461,6 +546,8 @@ export function RemoteSupport() {
           if (disposed.current) return;
           setConnected(false);
           setConnecting(false);
+          requestedDisplayId.current = null;
+          setSwitchingDisplay(false);
           setSecureAttentionAvailable(false);
           setSecureAttentionPending(false);
           if (secureAttentionRequest.current)
@@ -557,8 +644,45 @@ export function RemoteSupport() {
     !stale &&
     !paused &&
     !localStopped &&
-    !stopping;
+    !stopping &&
+    !switchingDisplay;
   const approved = ready && session.controlApproved;
+  const canSelectDisplay =
+    session?.status === "active" &&
+    connected &&
+    !paused &&
+    !localStopped &&
+    !stopping &&
+    !switchingDisplay &&
+    displays.length > 1;
+  const selectDisplay = (displayId: string) => {
+    if (
+      !canSelectDisplay ||
+      requestedDisplayId.current ||
+      !displays.some((item) => item.id === displayId) ||
+      displayId === activeDisplayId.current ||
+      socket.current?.readyState !== WebSocket.OPEN
+    )
+      return;
+    disableControl();
+    clearFrame();
+    requestedDisplayId.current = displayId;
+    displaySwitchConfirmed.current = false;
+    displaySwitchResumed.current = false;
+    currentPaused.current = true;
+    setPaused(true);
+    setPauseReason(
+      "Switching monitor. Waiting for the selected display and a fresh frame.",
+    );
+    setSwitchingDisplay(true);
+    setSelectedDisplayId(displayId);
+    setDisplay({ width: 0, height: 0 });
+    setStale(false);
+    lastFrame.current = 0;
+    setFrameAt(0);
+    // View-only sessions can select a monitor; this never grants input permission.
+    socket.current.send(JSON.stringify({ type: "selectDisplay", displayId }));
+  };
   const canSecureAttention =
     approved &&
     controlEnabled &&
@@ -732,18 +856,21 @@ export function RemoteSupport() {
   // These values are snapshotted by the server when the session is created.
   const approvalRequired = session?.approvalRequired !== false;
   const approvalSeconds = session?.approvalSeconds ?? 15;
+  const showSessionDetails = session?.showSessionDetails !== false;
   const statusText = localStopped
     ? "Session ended"
     : session?.status === "active"
-      ? !connected
-        ? connecting
-          ? "Connecting relay"
-          : "Connection closed"
-        : paused
-          ? "Desktop paused"
-          : stale
-            ? "Waiting for desktop"
-            : "Connected"
+      ? switchingDisplay
+        ? "Switching monitor"
+        : !connected
+          ? connecting
+            ? "Connecting relay"
+            : "Connection closed"
+          : paused
+            ? "Desktop paused"
+            : stale
+              ? "Waiting for desktop"
+              : "Connected"
       : session?.status === "awaiting_consent"
         ? approvalRequired
           ? "Waiting for staff response"
@@ -763,18 +890,21 @@ export function RemoteSupport() {
                     : "Unable to open session";
   const initialWait =
     connecting ||
+    switchingDisplay ||
     ["requested", "awaiting_consent"].includes(session?.status || "");
   const ended = terminal(session?.status) || localStopped;
-  const showOverlay = !hasFrame || paused || stale || ended;
+  const showOverlay = !hasFrame || paused || stale || ended || switchingDisplay;
   const overlayTitle = ended
     ? statusText
-    : paused
-      ? "The staff desktop is paused"
-      : stale
-        ? "The live desktop has stopped updating"
-        : session?.status === "active" && connected
-          ? "Waiting for the first desktop frame"
-          : statusText;
+    : switchingDisplay
+      ? "Switching to the selected monitor"
+      : paused
+        ? "The staff desktop is paused"
+        : stale
+          ? "The live desktop has stopped updating"
+          : session?.status === "active" && connected
+            ? "Waiting for the first desktop frame"
+            : statusText;
 
   return (
     <div className="rs-app">
@@ -825,12 +955,16 @@ export function RemoteSupport() {
           {ended
             ? "This session is closed. No desktop is displayed and remote input is disabled."
             : session?.status === "active"
-              ? "The staff computer keeps a visible sharing indicator. Ctrl+Alt+Shift+F12 ends sharing locally."
+              ? showSessionDetails
+                ? "The staff computer keeps a visible sharing indicator. Ctrl+Alt+Shift+F12 ends sharing locally."
+                : "No staff banner or icon is shown for this session. Ctrl+Alt+Shift+F12 still ends sharing locally."
               : !session
                 ? "Opening your session and loading its access policy."
                 : approvalRequired
                   ? `The staff member sees an approve/deny notice. Sharing starts after ${approvalSeconds} second${approvalSeconds === 1 ? "" : "s"} if no response; no desktop is shown before that.`
-                  : "Approval notice is disabled by an administrator. The session connects immediately with a visible staff indicator and local emergency shortcut."}
+                  : showSessionDetails
+                    ? "Approval notice is disabled by an administrator. The session connects immediately with a visible staff indicator and local emergency shortcut."
+                    : "Sessions start without a notice, banner, or icon. Ctrl+Alt+Shift+F12 still ends sharing locally."}
         </span>
         <strong>
           {session?.operatorName || userName || "Authorized operator"}
@@ -892,16 +1026,43 @@ export function RemoteSupport() {
           <span className="rs-mode-label">
             {ended
               ? "Control unavailable · session ended"
-              : !session?.controlApproved
-                ? "View only · control unavailable"
-                : controlEnabled
-                  ? focused
-                    ? "Mouse and keyboard go to the staff computer"
-                    : "Click the desktop to send input"
-                  : "Control available · enable when ready"}
+              : switchingDisplay
+                ? "Control unavailable · switching monitor"
+                : paused
+                  ? "Control unavailable · desktop paused"
+                  : !connected
+                    ? "Control unavailable · relay disconnected"
+                    : !session?.controlApproved
+                      ? "View only · control unavailable"
+                      : controlEnabled
+                        ? focused
+                          ? "Mouse and keyboard go to the staff computer"
+                          : "Click the desktop to send input"
+                        : "Control available · enable when ready"}
           </span>
         </div>
         <div className="rs-toolbar-group">
+          <label className="rs-scale rs-monitor-select">
+            <span>Monitor</span>
+            <select
+              aria-label="Monitor"
+              disabled={!canSelectDisplay}
+              value={selectedDisplayId}
+              onChange={(event) => selectDisplay(event.target.value)}
+            >
+              {displays.length ? (
+                displays.map((item, index) => (
+                  <option
+                    key={item.id}
+                    value={item.id}
+                  >{`Monitor ${index + 1} · ${item.name}${item.isPrimary ? " (Primary)" : ""} · ${item.width} × ${item.height}`}</option>
+                ))
+              ) : (
+                <option value="">Primary display</option>
+              )}
+            </select>
+            <ChevronDown size={12} />
+          </label>
           <label className="rs-scale">
             <Monitor size={14} />
             <select
@@ -1012,27 +1173,33 @@ export function RemoteSupport() {
                 <Monitor size={33} />
               )}
             </span>
-            <span className="rs-eyebrow">ATTENDED REMOTE SUPPORT</span>
+            <span className="rs-eyebrow">REMOTE SUPPORT SESSION</span>
             <h1>{overlayTitle}</h1>
             <p>
               {ended
                 ? "The desktop is hidden and remote input is disabled. Start a new session from the endpoint if more help is needed."
-                : paused
-                  ? pauseReason ||
-                    "The computer may be locked, showing a protected Windows prompt, or temporarily unavailable. Remote input is disabled."
-                  : stale
-                    ? "The last frame is hidden so an old screen cannot be mistaken for the current desktop. Control is released until live frames return."
-                    : session?.status === "awaiting_consent"
-                      ? approvalRequired
-                        ? `The staff member can approve or deny the visible request. If they do not respond, support starts after ${approvalSeconds} second${approvalSeconds === 1 ? "" : "s"}. Ctrl+Alt+Shift+F12 ends sharing locally.`
-                        : "Approval notice is disabled by an administrator. The support companion is starting with a visible sharing indicator; Ctrl+Alt+Shift+F12 ends sharing locally."
-                      : session?.status === "requested"
+                : switchingDisplay
+                  ? "The previous image is cleared and remote input is released. Viewing resumes only after the selected monitor is confirmed and sends a fresh frame. Enable control again when you are ready."
+                  : paused
+                    ? pauseReason ||
+                      "The computer may be locked, showing a protected Windows prompt, or temporarily unavailable. Remote input is disabled."
+                    : stale
+                      ? "The last frame is hidden so an old screen cannot be mistaken for the current desktop. Control is released until live frames return."
+                      : session?.status === "awaiting_consent"
                         ? approvalRequired
-                          ? "The endpoint will open a visible request in the staff member’s signed-in Windows session. No screen is shared yet."
-                          : "Approval notice is disabled by an administrator. The endpoint will connect immediately with a visible sharing indicator in its signed-in Windows session."
-                        : session?.status === "active"
-                          ? "The visible support companion is connected. The live desktop will appear as soon as it sends a frame."
-                          : "This window connects only to the selected endpoint using its session access policy."}
+                          ? `The staff member can approve or deny the visible request. If they do not respond, support starts after ${approvalSeconds} second${approvalSeconds === 1 ? "" : "s"}. Ctrl+Alt+Shift+F12 ends sharing locally.`
+                          : showSessionDetails
+                            ? "Approval notice is disabled by an administrator. The support companion is starting with a visible sharing indicator; Ctrl+Alt+Shift+F12 ends sharing locally."
+                            : "The administrator disabled the notice, banner, and icon. The session is starting; Ctrl+Alt+Shift+F12 still ends sharing locally."
+                        : session?.status === "requested"
+                          ? approvalRequired
+                            ? "The endpoint will open a visible request in the staff member’s signed-in Windows session. No screen is shared yet."
+                            : showSessionDetails
+                              ? "Approval notice is disabled by an administrator. The endpoint will connect immediately with a visible sharing indicator in its signed-in Windows session."
+                              : "Sessions start without a notice, banner, or icon. Ctrl+Alt+Shift+F12 still ends sharing locally."
+                          : session?.status === "active"
+                            ? "The support companion is connected. The live desktop will appear as soon as it sends a frame."
+                            : "This window connects only to the selected endpoint using its session access policy."}
             </p>
             {ended && (
               <a
