@@ -14,7 +14,7 @@ internal static class UpdateDiagnostics
     private static readonly HashSet<string> Stages = ["manifest", "download", "verify", "extract", "launch", "install", "complete", "policy"];
     internal static readonly IReadOnlyDictionary<string, string> ErrorSummaries = new Dictionary<string, string>
     {
-        ["disabled"]="Automatic updates are disabled.", ["unsupported_install"]="Automatic update requires a supported service installation.",
+        ["disabled"]="Automatic updates are disabled.", ["group_disabled"]="Automatic updates are turned off for this computer's group.", ["unsupported_install"]="Automatic update requires a supported service installation.",
         ["deferred_busy"]="Update check deferred while endpoint work is active.", ["dns_error"]="Update server name could not be resolved.",
         ["tls_error"]="Update connection failed TLS validation.", ["network_error"]="Update server could not be reached.",
         ["request_timeout"]="Update request timed out.", ["http_error"]="Update server returned an unsuccessful response.",

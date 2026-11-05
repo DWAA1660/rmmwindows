@@ -8,6 +8,8 @@
 - Recovery for computers already offline: `installer/Repair-Agent.ps1`, run **outside** the RMM (Action1 or an elevated prompt). It starts a stopped service (the agent then self-updates at startup) or, if the service can't start, reinstalls while keeping the enrollment. Rebooting also works (the service is Automatic).
 - Verified: real process-tree detection test passes locally; the mocked elevated handoff test runs in CI only (local shell not elevated); installer path tests and 47 server tests pass. Not verified on a real endpoint yet.
 
+- Same PR also adds the **Update agent** button and a **per-group automatic updates** switch (agent 0.1.9, schema 10). Merging publishes agent 0.1.9: groups with updates on will self-update to it. Restore-protected PCs need one thaw → Update agent → freeze so 0.1.9 is in their image, then turn their group's updates off.
+
 ## Previous checkpoint
 
 - PR #5 merged as `dc44403388e3187323dbd86c2f9cac808bc5d5a2` after complete Windows agent, server/web and Linux container CI passed (run `42051042776`). Production deployment succeeded at 15:08 UTC: healthy website, public agent **0.1.8** (78,887,530 bytes), schema **9**. Other ten Docker containers retained their existing uptime.

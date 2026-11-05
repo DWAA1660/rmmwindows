@@ -82,7 +82,7 @@ internal static class UpdateDiagnosticsTests
     }
     private sealed class PackageHandler:HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=request.RequestUri!.AbsolutePath=="/api/agent-download"
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=request.RequestUri!.AbsolutePath is "/api/agent-download" or "/api/agent/update-manifest"
             ? JsonContent.Create(new AgentPackageManifest("9.0.0","win-x64",new string('b',64),4,AgentUpdater.DownloadPath),options:AgentConfiguration.Json)
             : new ByteArrayContent([1,2,3,4])});
     }

@@ -7,6 +7,7 @@ export type EndpointGroup = {
   name: string;
   description: string;
   isDefault: boolean;
+  autoUpdate?: boolean;
   endpointCount: number;
   onlineCount: number;
 };
@@ -146,6 +147,7 @@ export function EndpointGroups({
             <strong>{item.name}</strong>
             <span>
               {item.endpointCount} computers · {item.onlineCount} online
+              {item.autoUpdate === false ? " · updates off" : ""}
             </span>
           </button>
         ))}
@@ -189,6 +191,37 @@ export function EndpointGroups({
           </div>
         ) : null}
       </div>
+      {group && (
+        <div className="group-auto-update">
+          <label>
+            <input
+              type="checkbox"
+              checked={group.autoUpdate !== false}
+              disabled={busy || readOnly}
+              onChange={(event) => {
+                const autoUpdate = event.target.checked;
+                void work(async () => {
+                  await request(`/groups/${group.id}/auto-update`, "PUT", { autoUpdate });
+                  await refresh();
+                  setMessage(
+                    autoUpdate
+                      ? `Automatic agent updates are on for ${group.name}.`
+                      : `Automatic agent updates are off for ${group.name}. Use Update agent on a computer to update it manually.`,
+                  );
+                });
+              }}
+            />
+            <span>
+              <strong>Automatic agent updates</strong>
+              <small>
+                {group.autoUpdate !== false
+                  ? "Agents in this group install new versions on their own when idle."
+                  : "Off: agents in this group never update on their own. Use this for restore-protected computers, and update them with Update agent while they are unfrozen. Agents older than 0.1.9 still update on their own until they get 0.1.9."}
+              </small>
+            </span>
+          </label>
+        </div>
+      )}
       {error && (
         <p className="group-feedback group-feedback-error" role="alert">
           {error}

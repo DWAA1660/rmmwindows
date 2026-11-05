@@ -33,6 +33,7 @@ internal static class AgentSelfTests
             ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
             ("startup metadata retries transient boot failures with a strict bound", UpdaterManifestRetryAsync),
             ("updater stages only verified packages and never loops", UpdaterStagingAsync),
+            ("updater honors the group's automatic-update setting from the authenticated manifest", UpdaterGroupPolicyAsync),
             ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync),
             ("file explorer lists, copies, moves, renames and creates folders (temp only)", FileOperationsBasicAsync),
             ("file explorer recursive delete removes links without following them", FileOperationsLinkDeleteAsync),
@@ -367,6 +368,49 @@ internal static class AgentSelfTests
         return memory.ToArray();
     }
 
+    private static async Task UpdaterGroupPolicyAsync()
+    {
+        var executable = Encoding.UTF8.GetBytes("not a real executable");
+        var package = BuildPackage("0.9.0", executable);
+        var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(package));
+        AgentPackageManifest Manifest() => new("0.9.0", "win-x64", digest, package.Length, AgentUpdater.DownloadPath);
+        foreach (var allowed in new[] { false, true })
+        {
+            var directory = CreateTemp();
+            try
+            {
+                var handler = new PackageHandler(package, Manifest()) { ScopedAutoUpdate = allowed };
+                using var updater = new AgentUpdater(TestConfiguration(directory), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, handler);
+                var staged = await updater.PrepareAsync("0.1.0", CancellationToken.None);
+                Assert(handler.Paths.FirstOrDefault() == "/api/agent/update-manifest" && handler.ScopedAuthorization == "Bearer test-only-token", "Updater did not ask for its own manifest with its credential.");
+                Assert(!handler.Paths.Contains("/api/agent-download"), "Updater fell back to the anonymous manifest although the scoped one answered.");
+                if (allowed) Assert(staged is not null && handler.Downloads == 1, "Allowed group did not update.");
+                else Assert(staged is null && handler.Downloads == 0 && updater.ReadState() is null, "Group with automatic updates off still downloaded or recorded an attempt.");
+            }
+            finally { Directory.Delete(directory, true); }
+        }
+        // An older server (404 on the scoped route) falls back to the anonymous manifest.
+        var oldServer = CreateTemp();
+        try
+        {
+            var handler = new PackageHandler(package, Manifest());
+            using var updater = new AgentUpdater(TestConfiguration(oldServer), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, handler);
+            Assert(await updater.PrepareAsync("0.1.0", CancellationToken.None) is not null && handler.Paths.Contains("/api/agent-download"), "Older server without the scoped route did not fall back.");
+        }
+        finally { Directory.Delete(oldServer, true); }
+        // Any other refusal (e.g. revoked credential) never falls back to the anonymous manifest.
+        var revoked = CreateTemp();
+        try
+        {
+            var handler = new PackageHandler(package, Manifest()) { ScopedStatus = HttpStatusCode.Unauthorized };
+            using var updater = new AgentUpdater(TestConfiguration(revoked), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, handler);
+            var refused = false;
+            try { await updater.PrepareAsync("0.1.0", CancellationToken.None); } catch (AgentApiException) { refused = true; }
+            Assert(refused && handler.Downloads == 0 && !handler.Paths.Contains("/api/agent-download"), "A refused credential fell back to the anonymous manifest.");
+        }
+        finally { Directory.Delete(revoked, true); }
+    }
+
     private static async Task UpdaterStagingAsync()
     {
         var directory = CreateTemp();
@@ -382,7 +426,7 @@ internal static class AgentSelfTests
             var staged = await updater.PrepareAsync("0.1.0", CancellationToken.None);
             Assert(staged is not null && File.ReadAllBytes(Path.Combine(staged.Directory, "agent", "LibraryRmm.Agent.exe")).SequenceEqual(executable), "Verified package was not staged.");
             Assert(updater.ReadState() is { Attempts: 1, Version: "0.9.0" }, "Attempt was not persisted.");
-            Assert(handler.Paths.All(path => path is "/api/agent-download" or AgentUpdater.DownloadPath), "Updater contacted an unexpected path.");
+            Assert(handler.Paths.All(path => path is "/api/agent/update-manifest" or "/api/agent-download" or AgentUpdater.DownloadPath), "Updater contacted an unexpected path.");
             Assert(await updater.PrepareAsync("0.1.0", CancellationToken.None) is null && handler.Downloads == 1, "Immediate retry ignored backoff (restart loop risk).");
 
             // Tampered archive: digest mismatch is rejected and nothing is staged.
@@ -689,11 +733,22 @@ internal static class AgentSelfTests
         public AgentPackageManifest Manifest => manifest;
         public List<string> Paths { get; } = [];
         public int Downloads { get; private set; }
+        // null: behave like an older server without the scoped route (404).
+        public bool? ScopedAutoUpdate { get; init; }
+        public HttpStatusCode? ScopedStatus { get; init; }
+        public string? ScopedAuthorization { get; private set; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
             Paths.Add(path);
             if (request.RequestUri.Host != "example.test") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            if (path == "/api/agent/update-manifest")
+            {
+                ScopedAuthorization = request.Headers.Authorization?.ToString();
+                if (ScopedStatus is { } status) return Task.FromResult(new HttpResponseMessage(status));
+                if (ScopedAutoUpdate is not { } allowed) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(manifest with { AutoUpdate = allowed }, options: AgentConfiguration.Json) });
+            }
             if (path == "/api/agent-download")
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(manifest, options: AgentConfiguration.Json) });
             if (path == AgentUpdater.DownloadPath)

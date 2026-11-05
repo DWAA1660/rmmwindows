@@ -169,7 +169,7 @@ export function createApp(options = {}) {
     next();
   });
   app.use(express.json({ limit: '2mb', strict: true }));
-  mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
+  const downloads = mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
   // Agent file-download chunks are the only raw (non-JSON) bodies; their route parses them itself.
   const rawFileChunk = req => req.method === 'PUT' && /^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) && req.is('application/octet-stream');
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
@@ -296,6 +296,14 @@ export function createApp(options = {}) {
       updateHealth.record(req.endpoint.id, report, now);
     });
     res.json({ endpointId: req.endpoint.id, serverTime: now });
+  });
+  // Authenticated manifest for agent 0.1.9+: the published package plus whether this computer's
+  // group allows automatic updates. Older agents keep using the anonymous /api/agent-download.
+  agentRouter.get('/update-manifest', (req, res) => {
+    const manifest = downloads.manifest();
+    if (!manifest) fail(503, 'Agent download is not included in this server build.');
+    const group = db.prepare('SELECT auto_update FROM endpoint_groups WHERE id=?').get(req.endpoint.group_id);
+    res.set('Cache-Control', 'no-store').json({ ...manifest, autoUpdate: group ? group.auto_update !== 0 : true });
   });
   agentRouter.post('/checkin', (req, res) => {
     const bootId = str(req.body.bootId, 'bootId', { max: 200, fallback: '' });

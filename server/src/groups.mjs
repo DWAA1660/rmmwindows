@@ -6,7 +6,7 @@ export function mountGroups(router, {db,audit,fail,str}) {
     const group = db.prepare('SELECT * FROM endpoint_groups WHERE id=?').get(id);
     if(!group) fail(404,'Group not found.');
     const members = db.prepare('SELECT last_seen FROM endpoints WHERE group_id=? AND revoked=0').all(id);
-    return {id:group.id,name:group.name,description:group.description,createdAt:group.created_at,isDefault:id===DEFAULT_GROUP,
+    return {id:group.id,name:group.name,description:group.description,createdAt:group.created_at,isDefault:id===DEFAULT_GROUP,autoUpdate:group.auto_update!==0,
       endpointCount:members.length,onlineCount:members.filter(row=>Date.now()-Date.parse(row.last_seen)<120000).length};
   };
   const input = body => {
@@ -18,7 +18,7 @@ export function mountGroups(router, {db,audit,fail,str}) {
   router.get('/groups',(req,res)=>res.json(db.prepare('SELECT id FROM endpoint_groups ORDER BY CASE id WHEN ? THEN 0 ELSE 1 END,name COLLATE NOCASE').all(DEFAULT_GROUP).map(row=>view(row.id))));
   router.post('/groups',(req,res)=>{
     const {name,description}=input(req.body);unique(name);const id=randomUUID();
-    db.prepare('INSERT INTO endpoint_groups VALUES (?,?,?,?)').run(id,name,description,new Date().toISOString());
+    db.prepare('INSERT INTO endpoint_groups(id,name,description,created_at) VALUES (?,?,?,?)').run(id,name,description,new Date().toISOString());
     audit(req.operator.username,'group.created',id,{name});res.status(201).json(view(id));
   });
   router.patch('/groups/:id',(req,res)=>{
@@ -26,6 +26,14 @@ export function mountGroups(router, {db,audit,fail,str}) {
     const {name,description}=input(req.body);unique(name,old.id);
     db.prepare('UPDATE endpoint_groups SET name=?,description=? WHERE id=?').run(name,description,old.id);
     audit(req.operator.username,'group.updated',old.id,{name});res.json(view(old.id));
+  });
+  // Allowed for every group, including the permanent New endpoints group. Manual
+  // "Update agent" requests are unaffected; this only controls agents' own automatic checks.
+  router.put('/groups/:id/auto-update',(req,res)=>{
+    const group=view(req.params.id);
+    if(typeof req.body?.autoUpdate!=='boolean') fail(400,'autoUpdate must be true or false.');
+    db.prepare('UPDATE endpoint_groups SET auto_update=? WHERE id=?').run(req.body.autoUpdate?1:0,group.id);
+    audit(req.operator.username,'group.auto_update.changed',group.id,{autoUpdate:req.body.autoUpdate});res.json(view(group.id));
   });
   router.post('/groups/:id/members',(req,res)=>{
     const result=transaction(db,()=>{
