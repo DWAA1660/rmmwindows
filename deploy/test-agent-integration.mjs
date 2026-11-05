@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join, sep } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 
 const phase = message => console.log(`[integration] ${message}`);
 
@@ -210,8 +210,13 @@ try {
   const one=await finishedTerminal(firstTerminal.id); assert.equal(one.state.status,'succeeded',one.state.summary+logs);
   const secondTerminal=await command('"$persisted $(Read-Persisted)"; $PWD.Path; [Console]::Write("terminal-α中文🙂")');
   const two=await finishedTerminal(secondTerminal.id); assert.equal(two.state.status,'succeeded',two.state.summary+logs);
-  assert.ok(two.stdout.includes('12345 saved-function') && two.stdout.includes(sample) && two.stdout.endsWith('terminal-α中文🙂'),two.stdout);
-  assert.equal((await api(`/terminals/${terminal.id}`)).workingDirectory,sample);
+  // GitHub runners report temp paths in 8.3 short form (RUNNER~1) while PowerShell prints the long
+  // form, so compare canonical long paths case-insensitively.
+  const longSample = realpathSync.native(sample).toLowerCase();
+  const samePath = value => typeof value === 'string' && realpathSync.native(value.trim()).toLowerCase() === longSample;
+  const printedPath = two.stdout.split(/\r?\n/).map(line => line.trim()).find(line => /^[a-z]:\\/i.test(line));
+  assert.ok(two.stdout.includes('12345 saved-function') && samePath(printedPath) && two.stdout.endsWith('terminal-α中文🙂'),two.stdout);
+  assert.ok(samePath((await api(`/terminals/${terminal.id}`)).workingDirectory), 'terminal working directory');
   const waiting=await command("[Console]::Write('terminal-waiting'); Start-Sleep -Seconds 40");
   const untilRunning=Date.now()+10000;
   while(Date.now()<untilRunning) { if((await api(`/jobs/${waiting.id}`)).status==='running')break; await new Promise(r=>setTimeout(r,100)); }
