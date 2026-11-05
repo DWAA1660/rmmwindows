@@ -1,5 +1,9 @@
 # Continue here — updated 2026-11-05 (fleet outage from the "Update Endpoint" script)
 
+## Latest: PowellDC signed-out support fix in progress
+
+Solo work (user said no sub-agents) on `fix/signed-out-support`, agent/companion0.1.12. User's latest clarification: preserve existing prompt/indicator settings; no banner/settings/UI changes in this fix. See final PROGRESS.md section for live session/job IDs and findings. PowellDC is online0.1.11, console3 at sign-in/no user, SAS policy1. Previous support cleanup escaped ObjectDisposedException and could leave its lease active forever; fixed idempotent channel disposal/unconditional Finished and added regression. Also fixed x64 WTS lock flag offset16 versus connection-state offset12. Builds/companion tests passed; full agent suite running. Next: complete tests/CI, publish0.1.12, update only PowellDC while idle using the official Update agent task handoff, verify fresh signed-out session/ending/repeated launch, preserve boot/identity and other host services. Never replay consumed jobs, sign in with credentials or reboot this domain controller for testing.
+
 ## Remote support takeover + Ctrl+Alt+Delete + smooth streaming — 2026-11-05 late (same branch, agent/companion 0.1.11, uncommitted at hand-off)
 
 - What changed and why: see PROGRESS.md (last section) and ARCHITECTURE.md → Remote support (Takeover, Screen helper + notice, Frames). API additions in API.md under "Agent 0.1.11+".

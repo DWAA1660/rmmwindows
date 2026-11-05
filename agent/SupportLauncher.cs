@@ -97,7 +97,8 @@ public static class SupportLauncher
 internal sealed class HelperChannel : IDisposable
 {
     private readonly SemaphoreSlim writing = new(1, 1);
-    private HelperChannel(NamedPipeServerStream pipe, StreamReader reader, StreamWriter writer, Process process)
+    private int disposed;
+    internal HelperChannel(NamedPipeServerStream pipe, StreamReader reader, StreamWriter writer, Process process)
     { Pipe = pipe; Reader = reader; Writer = writer; Process = process; }
     public NamedPipeServerStream Pipe { get; }
     public StreamReader Reader { get; }
@@ -146,10 +147,15 @@ internal sealed class HelperChannel : IDisposable
 
     public async Task<bool> TryWriteAsync(string line, CancellationToken ct)
     {
+        if (Volatile.Read(ref disposed) != 0) return false;
         try
         {
             await writing.WaitAsync(ct);
-            try { await Writer.WriteLineAsync(line.AsMemory(), ct); return true; }
+            try
+            {
+                if (Volatile.Read(ref disposed) != 0) return false;
+                await Writer.WriteLineAsync(line.AsMemory(), ct); return true;
+            }
             finally { writing.Release(); }
         }
         catch (Exception exception) when (exception is IOException or OperationCanceledException or ObjectDisposedException or InvalidOperationException) { return false; }
@@ -159,8 +165,13 @@ internal sealed class HelperChannel : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         Kill();
-        try { Reader.Dispose(); Writer.Dispose(); } catch (IOException) { }
+        // Kill closes the pipe first to unblock pending reads. StreamWriter.Dispose then tries
+        // to flush that closed pipe and can throw ObjectDisposedException, including after sign-out.
+        // Cleanup must never strand a lease as active or poison the next authorized launch.
+        try { Reader.Dispose(); } catch (Exception exception) when (exception is IOException or ObjectDisposedException) { }
+        try { Writer.Dispose(); } catch (Exception exception) when (exception is IOException or ObjectDisposedException) { }
         Process.Dispose();
     }
 }
@@ -282,9 +293,12 @@ internal sealed class SupportLease
             engine.Kill();
             if (requests is not null)
                 try { await requests.WaitAsync(TimeSpan.FromSeconds(2)); } catch (Exception exception) when (exception is OperationCanceledException or TimeoutException or ObjectDisposedException) { }
-            lock (sync) { notice?.Dispose(); notice = null; userToken?.Dispose(); userToken = null; }
-            engine.Dispose();
-            Volatile.Write(ref finished, 1);
+            try
+            {
+                lock (sync) { notice?.Dispose(); notice = null; userToken?.Dispose(); userToken = null; }
+                engine.Dispose();
+            }
+            finally { Volatile.Write(ref finished, 1); }
         }
     }
 

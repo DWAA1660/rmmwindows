@@ -2,6 +2,15 @@ using System.Text.Json;
 
 namespace LibraryRmm.Support;
 
+/// <summary>WTSINFOEX_LEVEL1_W is 8-byte aligned: its SessionFlags is at byte16,
+/// after Level/padding/SessionId/SessionState. State==Active is not the lock flag.</summary>
+public static class SupportSessionFacts
+{
+    public static bool IsLockedInfo(ReadOnlySpan<byte> info) => info.Length >= 20 &&
+        System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(info) == 1 &&
+        System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(info[16..]) == 0;
+}
+
 public sealed record SupportGrant(string SessionId, string OperatorName, DateTimeOffset ExpiresAt, bool RequestedControl, string Credential,
     bool ApprovalRequired = true, int ApprovalSeconds = 15, bool ShowSessionDetails = true)
 {
