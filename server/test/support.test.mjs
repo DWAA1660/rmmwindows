@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../src/app.mjs';
-import { mountSupport, relayFrame } from '../src/support.mjs';
+import { mountSupport, relayFrame, parseDeltaFrame } from '../src/support.mjs';
 import { listen } from './listen.mjs';
 import { hashToken } from '../src/security.mjs';
 
@@ -80,7 +80,15 @@ test('support HTTP authorization, internal launch, idempotency, ownership, old a
   assert.equal(session.status, 'requested'); assert.equal(session.controlApproved, false);
   assert.equal((await f.request('/support/sessions', 'POST', body, f.admin)).data.id, session.id);
   assert.equal((await f.request('/support/sessions', 'POST', { ...body, requestedControl: false }, f.admin)).status, 409);
-  assert.equal((await f.create(a)).status, 409);
+  // A second session for the same endpoint takes over: the first ends as replaced and its unconsumed launch job is cancelled.
+  const replacement = await f.create(a);
+  assert.equal(replacement.status, 201); assert.notEqual(replacement.data.id, session.id);
+  const replaced = (await f.request(`/support/sessions/${session.id}`, 'GET', undefined, f.admin)).data;
+  assert.equal(replaced.status, 'stopped'); assert.equal(replaced.reason, 'replaced_by_new_session');
+  assert.equal(f.db.prepare('SELECT status FROM jobs WHERE id=?').get(session.jobId).status, 'cancelled');
+  assert.ok(f.db.prepare("SELECT 1 FROM audit WHERE action='support.stopped' AND target=?").get(session.id));
+  // The replacement is the one this test continues with.
+  Object.assign(session, replacement.data);
   const claimPath = `/agent/support/${session.id}/claim`;
   assert.equal((await f.request(claimPath, 'POST', { jobId: session.jobId }, a.auth)).status, 409);
   assert.equal((await f.request(claimPath, 'POST', { jobId: session.jobId }, b.auth)).status, 404);
@@ -409,4 +417,97 @@ test('sign-in screen consent: allowed without a person to notify even when appro
   await until(() => otherDevice.messages.some(m => m.type === 'state' && m.controllerConnected), 'second device sees the operator');
   otherDevice.send(JSON.stringify({ type: 'consent', approved: false, control: false, userName: 'Windows sign-in screen', decision: 'signin_screen' }));
   await until(() => f.db.prepare('SELECT end_reason FROM support_sessions WHERE id=?').get(other.id).end_reason === 'invalid_consent', 'signin_screen cannot decline');
+});
+
+// Builds an agent 0.1.11 delta frame: header, rect table, then JPEGs.
+function deltaFrame(seq, { keyframe = false, width = 1920, height = 1080, rects = [[0, 0, width, height]] } = {}) {
+  const header = Buffer.alloc(14 + rects.length * 12);
+  header.write('RMF1', 0, 'latin1'); header.writeUInt32LE(seq, 4); header.writeUInt16LE(width, 8); header.writeUInt16LE(height, 10);
+  header[12] = keyframe ? 1 : 0; header[13] = rects.length;
+  rects.forEach(([x, y, w, h], index) => {
+    const at = 14 + index * 12;
+    header.writeUInt16LE(x, at); header.writeUInt16LE(y, at + 2); header.writeUInt16LE(w, at + 4); header.writeUInt16LE(h, at + 6); header.writeUInt32LE(jpeg.length, at + 8);
+  });
+  return Buffer.concat([header, ...rects.map(() => jpeg)]);
+}
+
+test('delta frame format: valid keyframes, patches and heartbeats parse; malformed headers and rectangles are rejected', () => {
+  assert.deepEqual(parseDeltaFrame(deltaFrame(7, { keyframe: true })), { seq: 7, width: 1920, height: 1080, keyframe: true, count: 1 });
+  assert.equal(parseDeltaFrame(deltaFrame(8, { rects: [[0, 0, 64, 64], [1856, 1016, 64, 64]] })).count, 2);
+  assert.equal(parseDeltaFrame(deltaFrame(9, { rects: [] })).count, 0, 'heartbeat with no changes');
+  assert.equal(parseDeltaFrame(deltaFrame(9, { keyframe: true, rects: [] })), null, 'keyframe must paint');
+  assert.equal(parseDeltaFrame(deltaFrame(1, { rects: [[1900, 0, 64, 64]] })), null, 'rectangle outside the surface');
+  assert.equal(parseDeltaFrame(Buffer.concat([deltaFrame(1), Buffer.from([0])])), null, 'trailing bytes');
+  assert.equal(parseDeltaFrame(deltaFrame(1).subarray(0, 30)), null, 'truncated');
+  assert.equal(parseDeltaFrame(jpeg), null, 'plain JPEG is not a delta frame');
+  const bad = deltaFrame(1); bad[bad.length - 1] = 0; assert.equal(parseDeltaFrame(bad), null, 'JPEG end marker');
+});
+
+test('agent 0.1.11 relay: secure-desktop capability, delta frames with acknowledgements and refresh, keyframe after resume, mid-session user consent and explained stops', async t => {
+  const f = await fixture(t); const a = await f.enroll('0.1.10'); const session = (await f.create(a)).data; const grant = await f.launch(a, session);
+  const browser = (await f.browser(session)).ws; const dev = (await f.device(session, grant)).ws;
+  const frames = () => browser.messages.filter(Buffer.isBuffer).length;
+  const status = id => f.db.prepare('SELECT status,end_reason FROM support_sessions WHERE id=?').get(id);
+  dev.send(JSON.stringify({ type: 'capabilities', secureAttention: true, secureDesktop: true, deltaFrames: true }));
+  await until(() => browser.messages.some(m => m.type === 'capabilities' && m.secureDesktop && m.deltaFrames), 'capabilities forwarded');
+  dev.send(JSON.stringify({ type: 'consent', approved: true, control: true, userName: 'Windows sign-in screen', decision: 'signin_screen' }));
+  await until(() => browser.messages.some(m => m.session?.status === 'active'), 'active');
+  dev.send(deltaFrame(1, { keyframe: true })); dev.send(deltaFrame(2, { rects: [[64, 64, 64, 64]] })); dev.send(deltaFrame(3, { rects: [] }));
+  await until(() => frames() === 3, 'keyframe, patch and heartbeat relayed unchanged');
+  browser.send(JSON.stringify({ type: 'frameAck', seq: 3 }));
+  await until(() => dev.messages.some(m => m.type === 'frameAck' && m.seq === 3), 'acknowledgement forwarded');
+  browser.send(JSON.stringify({ type: 'refresh' })); browser.send(JSON.stringify({ type: 'refresh' }));
+  await until(() => dev.messages.some(m => m.type === 'keyframe'), 'refresh becomes a keyframe request');
+  await delay(30); assert.equal(dev.messages.filter(m => m.type === 'keyframe').length, 1, 'refresh is rate limited');
+  // While a repaint is pending, patches are not relayed onto a picture the browser no longer has.
+  const before = frames();
+  dev.send(deltaFrame(4, { rects: [[0, 0, 64, 64]] })); await delay(40);
+  assert.equal(frames(), before);
+  dev.send(deltaFrame(5, { keyframe: true })); dev.send(deltaFrame(6, { rects: [[0, 0, 64, 64]] }));
+  await until(() => frames() === before + 2, 'keyframe then patches');
+  // Pausing with a known reason shows fixed text; resuming waits for a full repaint again.
+  dev.send(JSON.stringify({ type: 'paused', paused: true, reason: 'waiting_for_user' }));
+  await until(() => browser.messages.some(m => m.type === 'state' && m.paused && /Someone signed in/.test(m.reason)), 'explained pause');
+  dev.send(JSON.stringify({ type: 'paused', paused: false, reason: 'user_approved' }));
+  await until(() => browser.messages.at(-1)?.paused === false, 'resumed');
+  const resumed = frames();
+  dev.send(deltaFrame(7, { rects: [[0, 0, 64, 64]] })); dev.send(deltaFrame(8, { keyframe: true }));
+  await until(() => frames() === resumed + 1, 'only the keyframe after resume');
+  await delay(30); assert.equal(frames(), resumed + 1);
+  // Ctrl+Alt+Del on a helper that shows secure desktops says so.
+  const requestId = randomUUID(); browser.send(JSON.stringify({ type: 'secureAttention', requestId }));
+  await until(() => dev.messages.some(m => m.type === 'secureAttention'), 'SAS forwarded');
+  dev.send(JSON.stringify({ type: 'secureAttentionResult', requestId, success: true, message: 'sent' }));
+  await until(() => browser.messages.some(m => m.requestId === requestId && /appears in the viewer/.test(m.message)), 'secure desktop result text');
+  // Someone signs in mid-session and approves view only: control is withdrawn and audited.
+  dev.send(JSON.stringify({ type: 'userConsent', approved: true, control: false, userName: 'LIB\\staff', decision: 'automatic' }));
+  await until(() => browser.messages.some(m => m.session?.consentUser === 'LIB\\staff' && !m.session.controlApproved), 'user consent applied');
+  assert.ok(dev.messages.some(m => m.type === 'input' && m.action === 'releaseAll'));
+  const consent = f.db.prepare("SELECT details FROM audit WHERE action='support.consent' AND target=? ORDER BY rowid DESC").get(session.id);
+  assert.equal(JSON.parse(consent.details).phase, 'user_signed_in');
+  browser.send(JSON.stringify({ type: 'input', action: 'keyDown', key: 'KeyA' })); await delay(40);
+  assert.ok(!dev.messages.some(m => m.type === 'input' && m.key === 'KeyA'), 'view-only after user consent');
+  dev.send(JSON.stringify({ type: 'stop', reason: 'local_emergency_hotkey' }));
+  await until(() => status(session.id).end_reason === 'local_emergency_hotkey', 'stop reason kept');
+
+  const started = async () => {
+    const endpoint = await f.enroll('0.1.10'); const support = (await f.create(endpoint)).data; const supportGrant = await f.launch(endpoint, support);
+    await f.browser(support); const device = (await f.device(support, supportGrant)).ws;
+    device.send(JSON.stringify({ type: 'capabilities', secureAttention: true, secureDesktop: true, deltaFrames: true }));
+    device.send(JSON.stringify({ type: 'consent', approved: true, control: true, userName: 'Windows sign-in screen', decision: 'signin_screen' }));
+    await until(() => status(support.id).status === 'active', 'started');
+    return { support, device };
+  };
+  // A declined mid-session notice ends as declined.
+  const second = await started();
+  second.device.send(JSON.stringify({ type: 'userConsent', approved: false, control: false, userName: 'LIB\\staff', decision: 'manual' }));
+  await until(() => status(second.support.id).status === 'declined', 'declined');
+  // Once delta frames are announced, a plain JPEG is malformed.
+  const third = await started();
+  third.device.send(jpeg);
+  await until(() => status(third.support.id).end_reason === 'invalid_frame', 'plain JPEG refused after delta capability');
+  // Unknown stop reasons stay generic.
+  const fourth = await started();
+  fourth.device.send(JSON.stringify({ type: 'stop', reason: 'anything at all' }));
+  await until(() => status(fourth.support.id).end_reason === 'staff_stopped', 'unknown reason generic');
 });

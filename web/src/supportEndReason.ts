@@ -4,9 +4,24 @@ const reasons: Record<string, string> = {
   launch_consent_timeout:
     "The endpoint did not connect within two minutes. It may be offline, busy, or have no one signed in.",
   operator_stopped: "You ended the session.",
-  staff_stopped:
-    "The session was ended on the computer (emergency shortcut, someone signing in or out, lock, or the helper closing).",
+  staff_stopped: "The session was ended on the computer.",
   staff_declined: "The person at the computer declined the request.",
+  staff_closed: "The person at the computer closed the support notice.",
+  replaced_by_new_session:
+    "A new support session was started for this computer, so this one was closed.",
+  local_emergency_hotkey:
+    "Someone at the computer pressed Ctrl+Alt+Shift+F12 to end support.",
+  notice_closed:
+    "The support notice on the computer closed (the user signed out or closed it), so sharing their desktop stopped.",
+  console_session_changed:
+    "The computer switched to another Windows session (user switching or a remote desktop connection) for over 30 seconds.",
+  capture_or_relay_failed:
+    "The computer could not keep capturing or sending its screen.",
+  management_service_disconnected:
+    "The RMM agent service on the computer stopped or restarted.",
+  selected_display_unavailable: "The selected monitor was disconnected.",
+  emergency_hotkey_unavailable:
+    "Ctrl+Alt+Shift+F12 could not be registered on the computer, so support did not start.",
   browser_disconnected: "This support window disconnected from the relay.",
   device_disconnected: "The computer disconnected from the relay.",
   browser_transport_failed: "This support window's connection failed.",

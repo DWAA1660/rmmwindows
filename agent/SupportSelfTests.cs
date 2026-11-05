@@ -109,7 +109,25 @@ public static class SupportSelfTests
             try { await SupportPipeFraming.ReadLineAsync(reader, 5, CancellationToken.None); } catch (InvalidDataException) { rejected = true; }
             Assert(rejected, "Oversized/incomplete pipe frame accepted.");
         }
-        Console.WriteLine("PASS attended-support policy/countdown, controller readiness, end/expiry, desktop/input and bounded-pipe checks (no capture or input performed)");
+        // Changed tiles merge into few rectangles, clipped to the surface; many scattered tiles collapse to one bounding box.
+        var grid = new bool[4 * 3];
+        grid[0] = grid[1] = grid[4] = grid[5] = true; // 2x2 block at the top left
+        grid[11] = true;                               // bottom-right corner tile
+        var merged = SupportFrameFormat.Merge(grid, 4, 3, 64, 250, 150);
+        Assert(merged.Count == 2 && merged.Contains(new SupportRect(0, 0, 128, 128)) && merged.Contains(new SupportRect(192, 128, 58, 22)), "Tile merge/clip failed.");
+        Assert(SupportFrameFormat.Merge(new bool[12], 4, 3, 64, 250, 150).Count == 0, "Unchanged screen produced rectangles.");
+        var checker = Enumerable.Range(0, 100).Select(index => (index + index / 10) % 2 == 0).ToArray();
+        Assert(SupportFrameFormat.Merge(checker, 10, 10, 64, 640, 640, maximum: 8).SequenceEqual([new SupportRect(0, 0, 640, 640)]), "Scattered tiles did not collapse.");
+        // Frame layout matches the relay's parser (server/src/support.mjs parseDeltaFrame).
+        byte[] tinyJpeg = [0xff, 0xd8, 1, 0xff, 0xd9];
+        var frame = SupportFrameFormat.Build(7, 250, 150, false, [(new SupportRect(0, 0, 128, 128), tinyJpeg), (new SupportRect(192, 128, 58, 22), tinyJpeg)]);
+        Assert(System.Text.Encoding.ASCII.GetString(frame, 0, 4) == "RMF1" && BitConverter.ToUInt32(frame, 4) == 7 && BitConverter.ToUInt16(frame, 8) == 250 &&
+            BitConverter.ToUInt16(frame, 10) == 150 && frame[12] == 0 && frame[13] == 2 && BitConverter.ToUInt16(frame, 26 + 0) == 192 &&
+            BitConverter.ToUInt32(frame, 26 + 8) == 5 && frame.Length == 14 + 24 + 10, "Frame layout changed.");
+        Assert(SupportFrameFormat.Build(8, 250, 150, false, []).Length == 14, "Heartbeat frame must be header only.");
+        Reject(() => SupportFrameFormat.Build(9, 250, 150, true, []));
+        Reject(() => SupportFrameFormat.Build(9, 250, 150, false, [(new SupportRect(200, 0, 64, 64), tinyJpeg)]));
+        Console.WriteLine("PASS attended-support policy/countdown, controller readiness, end/expiry, desktop/input, bounded-pipe and frame-format checks (no capture or input performed)");
     }
     private static void Assert(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
     private static void Reject(Action action)

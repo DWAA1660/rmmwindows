@@ -53,3 +53,7 @@ The latest user direction relayed by root makes the approval notice and sharing 
 - Clipboard/file transfer/recording, secure/UAC desktop control and automatic reconnect are unavailable. Locked/protected desktops pause or end according to the companion policy. Actual multi-monitor capture/input and service/interactive-user lifecycle still require end-to-end verification on a disposable or expressly attended endpoint. This contributor performed no real desktop capture or input test.
 
 Coordinator completed synthetic admin-policy save/bypass and CAD-denial feedback checks; no production desktop used. Production schema7/settings UI and agent0.1.6 download verified after PR#1 deployment; artifacts/support-settings-production.png is the live read-only proof. Native staff/VM lifecycle and Windows sign-in support remain pending.
+
+## 2026-11-05 — agent/companion 0.1.11 supersedes parts of this handoff
+
+See ARCHITECTURE.md → Remote support (Takeover, Screen helper + notice, Frames) and API.md "Agent 0.1.11+". Capture and input now run in a SYSTEM screen helper that follows the input desktop (Ctrl+Alt+Delete, lock, sign-in, UAC stay visible and controllable); the user-session companion is notice/indicator/hotkey only; frames are acknowledged RMF1 delta frames; a new session for an endpoint ends the open one (`replaced_by_new_session`). Statements below about 1600 px/3 fps whole JPEGs, pausing on secure desktops or one session per endpoint returning 409 describe agents up to 0.1.10.

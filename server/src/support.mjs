@@ -15,6 +15,16 @@ const attentionMessages = Object.freeze({
   not_available: 'Ctrl+Alt+Del is unavailable for this session.',
   failed: 'Windows could not request Ctrl+Alt+Del.'
 });
+// Fixed text for the device's pause reasons; anything else gets the generic sentence.
+const pauseMessages = Object.freeze({
+  waiting_for_user: 'Someone signed in at the computer. Viewing resumes after the notice on their desktop is approved (or its countdown ends).',
+  desktop_unavailable: 'The computer’s screen is not available right now (it may be switching users or Windows sessions).',
+  selecting_display: 'Switching monitor',
+  display_configuration_changed: 'The computer’s monitors changed.'
+});
+// Device stop reasons the relay records as-is so operators see why a session ended. Others become staff_stopped.
+const deviceStopReasons = new Set(['local_emergency_hotkey', 'staff_declined', 'staff_closed', 'notice_closed', 'console_session_changed',
+  'capture_or_relay_failed', 'management_service_disconnected', 'selected_display_unavailable', 'session_expired', 'emergency_hotkey_unavailable']);
 const keys = /^(?:Key[A-Z]|Digit[0-9]|Numpad[0-9]|F(?:[1-9]|1[0-2])|Arrow(?:Up|Down|Left|Right)|(?:Shift|Control|Alt|Meta)(?:Left|Right)|Backspace|Tab|Enter|Escape|Space|Delete|Insert|Home|End|PageUp|PageDown|CapsLock|NumLock|ScrollLock|Backquote|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Comma|Period|Slash|Numpad(?:Add|Subtract|Multiply|Divide|Decimal|Enter))$/;
 
 // Only live display frames may be dropped. Durable job output never passes through this relay.
@@ -22,6 +32,29 @@ export function relayFrame(socket, frame, maxBufferedBytes = 1024 * 1024) {
   if (!open(socket) || socket.bufferedAmount > maxBufferedBytes) return false;
   socket.send(frame, { binary: true });
   return true;
+}
+
+const isJpeg = (data, start, length) => length >= 4 && data[start] === 0xff && data[start + 1] === 0xd8
+  && data[start + length - 2] === 0xff && data[start + length - 1] === 0xd9;
+
+/**
+ * Validates an agent 0.1.11+ delta frame: "RMF1", seq u32, surface width/height u16, flags u8 (bit0 keyframe),
+ * rect count u8, then count x (x,y,w,h u16, jpegLength u32) and the JPEGs back to back. All little-endian.
+ * A keyframe repaints the whole surface; other frames patch changed rectangles. Returns null when malformed.
+ */
+export function parseDeltaFrame(data) {
+  if (!Buffer.isBuffer(data) || data.length < 14 || data.toString('latin1', 0, 4) !== 'RMF1') return null;
+  const seq = data.readUInt32LE(4), width = data.readUInt16LE(8), height = data.readUInt16LE(10), flags = data[12], count = data[13];
+  if (!width || !height || width > 16000 || height > 16000 || (flags & ~1) || count > 64 || ((flags & 1) && !count)) return null;
+  let offset = 14 + count * 12;
+  if (data.length < offset) return null;
+  for (let index = 0; index < count; index++) {
+    const at = 14 + index * 12;
+    const x = data.readUInt16LE(at), y = data.readUInt16LE(at + 2), w = data.readUInt16LE(at + 4), h = data.readUInt16LE(at + 6), length = data.readUInt32LE(at + 8);
+    if (!w || !h || x + w > width || y + h > height || offset + length > data.length || !isJpeg(data, offset, length)) return null;
+    offset += length;
+  }
+  return offset === data.length ? { seq, width, height, keyframe: Boolean(flags & 1), count } : null;
 }
 
 export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, validationIntervalMs = 5000 }) {
@@ -41,7 +74,8 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
     launchSummary: row.end_reason === 'launch_failed' ? (db.prepare('SELECT summary FROM jobs WHERE id=?').get(row.job_id)?.summary || '').slice(0, 500) || null : null });
   const runtime = id => {
     if (!connections.has(id)) connections.set(id, { paused: false, reason: null,
-      capabilities: { type: 'capabilities', secureAttention: false, secureDesktop: false }, attentionIds: new Set(), displays: [] });
+      capabilities: { type: 'capabilities', secureAttention: false, secureDesktop: false, deltaFrames: false }, attentionIds: new Set(), displays: [],
+      awaitingKeyframe: false, lastRefreshAt: 0 });
     return connections.get(id);
   };
   const send = (socket, data) => {
@@ -152,10 +186,14 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
         fail(409, 'Update the endpoint agent to version 0.1.6 or later before starting remote support.');
       if (!policy().showSessionDetails && Number(parsedVersion[1]) === 0 && Number(parsedVersion[2]) === 1 && Number(parsedVersion[3]) < 7)
         fail(409, 'Update the endpoint agent to version 0.1.7 or later to use the session indicator setting.');
-      for (const current of db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").all(endpointId)) valid(get(current.id));
+      // A new session takes over: any session still open for this endpoint (stuck, abandoned or another
+      // operator's) is ended first. The agent likewise closes its previous helper before launching the new one.
+      for (const current of db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").all(endpointId))
+        if (valid(get(current.id))) end(current.id, 'stopped', 'replaced_by_new_session', req.operator.username);
       const id = randomUUID();
       transaction(db, () => {
-        if (db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").get(endpointId)) fail(409, 'This endpoint already has a remote support session.');
+        // Only a concurrent create between the takeover above and this transaction can still hold the endpoint.
+        if (db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").get(endpointId)) fail(409, 'Another remote support session for this endpoint started at the same moment. Try again.');
         const snapshot = policy();
         db.prepare(`INSERT INTO support_sessions(id,endpoint_id,operator_id,operator_session_hash,operator_name,status,requested_control,created_at,expires_at,idempotency_key,request_hash,approval_required,approval_seconds,show_session_details)
           VALUES (?,?,?,?,?,'requested',?,?,?,?,?,?,?,?)`).run(id, endpointId, req.operator.user_id, req.operator.token_hash, req.operator.username,
@@ -239,12 +277,21 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
         if (closed) return;
         const current = get(row.id); if (!valid(current)) return;
         if (Date.now() - rateStart >= 1000) { rateStart = Date.now(); count = 0; frames = 0; }
-        if (++count > (side === 'browser' ? 180 : 40)) return end(row.id, 'failed', 'message_rate_exceeded');
+        if (++count > (side === 'browser' ? 240 : 120)) return end(row.id, 'failed', 'message_rate_exceeded');
         if (binary) {
           if (side !== 'device') return end(row.id, 'failed', 'invalid_protocol');
-          if (current.status !== 'active' || rt.paused || ++frames > 10) return;
-          // JPEG magic/end marker; frames are immediately relayed and never saved.
-          if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8 || data[data.length - 2] !== 0xff || data[data.length - 1] !== 0xd9) return end(row.id, 'failed', 'invalid_frame');
+          if (current.status !== 'active' || rt.paused || ++frames > 30) return;
+          // Frames are immediately relayed and never saved. Agents before 0.1.11 send whole JPEGs.
+          if (rt.capabilities.deltaFrames) {
+            const frame = parseDeltaFrame(data);
+            if (!frame) return end(row.id, 'failed', 'invalid_frame');
+            // After a dropped frame the browser's picture is incomplete: skip patches until a full repaint.
+            if (rt.awaitingKeyframe && !frame.keyframe) return;
+            if (relayFrame(rt.browser, data)) { if (frame.keyframe) rt.awaitingKeyframe = false; }
+            else if (open(rt.browser)) { rt.awaitingKeyframe = true; send(rt.device, { type: 'keyframe' }); }
+            return;
+          }
+          if (!isJpeg(data, 0, data.length)) return end(row.id, 'failed', 'invalid_frame');
           relayFrame(rt.browser, data); return;
         }
         if (data.length > 4096) return end(row.id, 'failed', 'invalid_protocol');
@@ -252,10 +299,16 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
         try { message = JSON.parse(data.toString()); } catch { return end(row.id, 'failed', 'invalid_protocol'); }
         if (!message || typeof message !== 'object' || Array.isArray(message)) return end(row.id, 'failed', 'invalid_protocol');
         if (side === 'device') {
-          if (message.type === 'stop') return end(row.id, 'stopped', 'staff_stopped');
+          if (message.type === 'stop') {
+            const reason = typeof message.reason === 'string' && deviceStopReasons.has(message.reason) ? message.reason : 'staff_stopped';
+            return reason === 'staff_declined' ? end(row.id, 'declined', reason) : end(row.id, 'stopped', reason);
+          }
           if (message.type === 'capabilities') {
-            if (typeof message.secureAttention !== 'boolean' || message.secureDesktop !== false) return end(row.id, 'failed', 'invalid_capabilities');
-            rt.capabilities = { type: 'capabilities', secureAttention: message.secureAttention, secureDesktop: false };
+            // secureDesktop: the agent 0.1.11+ helper runs as SYSTEM and keeps showing Ctrl+Alt+Delete, lock, sign-in and UAC screens.
+            if (typeof message.secureAttention !== 'boolean' || typeof message.secureDesktop !== 'boolean'
+              || (message.deltaFrames !== undefined && typeof message.deltaFrames !== 'boolean')) return end(row.id, 'failed', 'invalid_capabilities');
+            if (rt.capabilities.deltaFrames && !message.deltaFrames) return end(row.id, 'failed', 'invalid_capabilities');
+            rt.capabilities = { type: 'capabilities', secureAttention: message.secureAttention, secureDesktop: message.secureDesktop, deltaFrames: message.deltaFrames === true };
             send(rt.browser, rt.capabilities); return;
           }
           if (message.type === 'displays') {
@@ -282,13 +335,26 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
             broadcast(row.id); return;
           }
           if (current.status !== 'active') return;
+          if (message.type === 'userConsent') {
+            // Someone signed in during a sign-in/lock screen session and answered the notice on their own desktop.
+            if (typeof message.approved !== 'boolean' || typeof message.control !== 'boolean' || typeof message.userName !== 'string'
+              || !message.userName.length || message.userName.length > 200 || !['manual', 'automatic', 'unattended'].includes(message.decision)
+              || (message.decision === 'unattended' && current.approval_required)) return end(row.id, 'failed', 'invalid_consent');
+            const control = message.approved && message.control && Boolean(current.requested_control);
+            audit(`agent:${row.endpoint_id}`, 'support.consent', row.id, { approved: message.approved, control, decision: message.decision, phase: 'user_signed_in' });
+            if (!message.approved) return end(row.id, 'declined', 'staff_declined');
+            db.prepare('UPDATE support_sessions SET control_approved=?,consent_user=? WHERE id=?').run(control ? 1 : 0, message.userName, row.id);
+            if (!control) send(rt.device, { type: 'input', action: 'releaseAll' });
+            broadcast(row.id); return;
+          }
           if (message.type === 'secureAttentionResult') {
             if (typeof message.requestId !== 'string' || !uuid.test(message.requestId) || typeof message.success !== 'boolean'
               || typeof message.message !== 'string' || !Object.hasOwn(attentionMessages, message.message) || (message.success !== (message.message === 'sent')))
               return end(row.id, 'failed', 'invalid_secure_attention_result');
             if (rt.pendingAttention?.requestId !== message.requestId) return;
             rt.pendingAttention = null;
-            send(rt.browser, { type: 'secureAttentionResult', requestId: message.requestId, success: message.success, message: attentionMessages[message.message] });
+            send(rt.browser, { type: 'secureAttentionResult', requestId: message.requestId, success: message.success,
+              message: message.success && rt.capabilities.secureDesktop ? 'Ctrl+Alt+Del sent. The Windows security screen appears in the viewer.' : attentionMessages[message.message] });
             audit(`agent:${row.endpoint_id}`, 'support.secureattention.result', row.id, { requestId: message.requestId, success: message.success, result: message.message });
             return;
           }
@@ -305,8 +371,11 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
               if (!rt.switchReady) return end(row.id, 'failed', 'display_switch_unconfirmed');
               rt.switchingTo = null; rt.switchReady = false;
             }
-            rt.paused = message.paused; rt.reason = rt.paused ? 'Desktop unavailable or paused by staff' : null;
+            rt.paused = message.paused;
+            rt.reason = rt.paused ? (Object.hasOwn(pauseMessages, message.reason) ? pauseMessages[message.reason] : 'Desktop unavailable or paused by staff') : null;
             if (rt.paused) send(rt.device, { type: 'input', action: 'releaseAll' });
+            // Whatever the browser shows after a pause is cleared; the device repaints the whole screen on resume.
+            else rt.awaitingKeyframe = rt.capabilities.deltaFrames;
             broadcast(row.id); return;
           }
           return end(row.id, 'failed', 'invalid_protocol');
@@ -320,6 +389,18 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
           broadcast(row.id);
           audit(current.operator_name, 'support.display.selected', row.id, {displayId:message.displayId});
           send(rt.device, {type:'selectDisplay',displayId:message.displayId}); return;
+        }
+        if (message.type === 'frameAck') {
+          // Flow control: the device sends the next frame only after the browser has drawn earlier ones.
+          if (!Number.isSafeInteger(message.seq) || message.seq < 0 || message.seq > 0xffffffff) return end(row.id, 'failed', 'invalid_protocol');
+          if (current.status === 'active' && rt.capabilities.deltaFrames) send(rt.device, { type: 'frameAck', seq: message.seq });
+          return;
+        }
+        if (message.type === 'refresh') {
+          // The browser cleared its picture (pause, stale, decode error) and needs a full repaint.
+          if (current.status !== 'active' || !rt.capabilities.deltaFrames || Date.now() - rt.lastRefreshAt < 250) return;
+          rt.lastRefreshAt = Date.now(); rt.awaitingKeyframe = true;
+          send(rt.device, { type: 'keyframe' }); return;
         }
         if (message.type === 'secureAttention') {
           if (typeof message.requestId !== 'string' || !uuid.test(message.requestId)) return end(row.id, 'failed', 'invalid_secure_attention');
