@@ -41,6 +41,8 @@ import {
   Wifi,
   X,
   XCircle,
+  Package,
+  Sparkles,
 } from "lucide-react";
 import "./styles.css";
 import {EndpointGroups,type EndpointGroup} from './EndpointGroups';
@@ -54,6 +56,11 @@ import { RemoteSupport, openRemoteSupport } from './RemoteSupport';
 import { SupportSettings } from './SupportSettings';
 import { EndpointDirectory } from './EndpointDirectory';
 import { TerminalConsole } from './TerminalConsole';
+import { SoftwareInventory } from './SoftwareInventory';
+import { StarterScripts } from './StarterScripts';
+import { filterActivity, isBrowsingJob } from './activityFilter';
+import { CommandPalette } from './CommandPalette';
+import type { PaletteItem } from './commandPaletteModel';
 
 type Disk = {
   name: string;
@@ -83,6 +90,10 @@ type Inventory = {
   agentVersion?: string;
   disks?: Disk[];
   software?: Software[];
+  pendingReboot?: boolean | null;
+  pendingRebootReasons?: string[];
+  uptimeSeconds?: number | null;
+  directory?: { canonicalName?: string | null; organizationalUnits?: string[] } | null;
 };
 type Endpoint = {
   groupId?: string;
@@ -136,6 +147,7 @@ type User = AccountUser;
 type View =
   | "overview"
   | "endpoints"
+  | "software"
   | "scripts"
   | "schedules"
   | "activity"
@@ -518,7 +530,12 @@ function App() {
       script: string;
       path: string;
       chooseEndpoints?: boolean;
+      timeoutMinutes?: number;
     } | null>(null),
+    [starterOpen, setStarterOpen] = useState(false),
+    [activitySearch, setActivitySearch] = useState(""),
+    [activityKind, setActivityKind] = useState("all"),
+    [showBrowsing, setShowBrowsing] = useState(false),
     [scriptForm, setScriptForm] = useState<Partial<Script> | null>(null),
     [scheduleForm, setScheduleForm] = useState(false),
     [tokenForm, setTokenForm] = useState(false),
@@ -613,6 +630,12 @@ function App() {
       if (latest) setDetail(latest);
     }
   }, [endpoints]);
+  // Activity list: folder listings hidden unless requested, plus status/type/text filters.
+  const activityJobs = filterActivity(
+    jobs,
+    { status: filter, kind: activityKind, query: activitySearch, showBrowsing },
+    (job) => endpointName(endpoints.find((ep) => ep.id === job.endpointId)),
+  );
   const active = endpoints.filter((ep) => !ep.revoked),
     online = active.filter((ep) => ep.online),
     offline = active.length - online.length,
@@ -622,9 +645,16 @@ function App() {
   const filtered = active
     .filter(ep=>view!=='endpoints'||groupFilter==='all'||ep.groupId===groupFilter)
     .filter((ep) =>
-      `${endpointName(ep)} ${ep.hostname} ${ep.inventory?.ipv4?.join(" ")} ${ep.inventory?.domain} ${ep.tags?.join(" ")}`
+      // Every word must match somewhere: name, IP, domain, tags, user, OS or AD OU path.
+      search
         .toLowerCase()
-        .includes(search.toLowerCase()),
+        .split(/\s+/)
+        .filter(Boolean)
+        .every((word) =>
+          `${endpointName(ep)} ${ep.hostname} ${ep.inventory?.ipv4?.join(" ")} ${ep.inventory?.domain} ${ep.tags?.join(" ")} ${ep.inventory?.loggedOnUser ?? ""} ${ep.inventory?.osName ?? ""} ${ep.inventory?.directory?.canonicalName ?? ""} ${ep.groupName ?? ""}`
+            .toLowerCase()
+            .includes(word),
+        ),
     )
     .filter(
       (ep) =>
@@ -632,7 +662,8 @@ function App() {
         (filter === "online" && ep.online) ||
         (filter === "offline" && !ep.online) ||
         (filter === "attention" &&
-          ep.inventory?.disks?.some((d) => usedPercent(d) >= 85)),
+          ep.inventory?.disks?.some((d) => usedPercent(d) >= 85)) ||
+        (filter === "reboot" && ep.inventory?.pendingReboot === true),
     );
   const toggleSelected = (id: string) =>
     setSelected((current) =>
@@ -644,6 +675,7 @@ function App() {
     ids: string[],
     kind: string,
     payload: Record<string, unknown>,
+    timeoutSeconds?: number,
   ) => {
     setBusy(true);
     setError("");
@@ -652,7 +684,7 @@ function App() {
         endpointIds: ids,
         kind,
         payload,
-        timeoutSeconds: kind === "storage" ? 900 : 300,
+        timeoutSeconds: timeoutSeconds ?? (kind === "storage" ? 900 : 300),
         idempotencyKey: crypto.randomUUID(),
         runName: `${(()=>{const names=[...new Set(active.filter(ep=>ids.includes(ep.id)).map(ep=>ep.groupName||'New endpoints'))];return names.length===1?names[0]:'Selected endpoints';})()} · ${kind}`,
       });
@@ -690,6 +722,7 @@ function App() {
       icon: Monitor,
       count: active.length,
     },
+    { key: "software", label: "Software", icon: Package },
     { key: "scripts", label: "Script library", icon: Code2 },
     { key: "schedules", label: "Schedules", icon: CalendarClock },
     { key: "activity", label: "Activity", icon: Activity },
@@ -702,6 +735,10 @@ function App() {
     endpoints: {
       title: "Endpoints",
       subtitle: "Every computer, one place to keep it running.",
+    },
+    software: {
+      title: "Software",
+      subtitle: "Every installed program across the fleet, by version.",
     },
     scripts: {
       title: "Script library",
@@ -727,6 +764,48 @@ function App() {
       title: "Workspace settings",
       subtitle: "Application details and controlled updates.",
     },
+  };
+  // Ctrl+K quick search: every page, every active computer and the most common actions.
+  const paletteItems: PaletteItem[] = [
+    ...(Object.keys(pageInfo) as View[]).map((key) => ({
+      id: "page:" + key,
+      kind: "page" as const,
+      title: pageInfo[key].title,
+      detail: pageInfo[key].subtitle,
+    })),
+    ...active.map((ep) => ({
+      id: "computer:" + ep.id,
+      kind: "computer" as const,
+      title: endpointName(ep),
+      detail: [
+        ep.online ? "Online" : "Offline",
+        ep.inventory?.ipv4?.join(", "),
+        ep.inventory?.loggedOnUser,
+        ep.groupName,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      keywords: [ep.hostname, ep.inventory?.osName, ep.inventory?.directory?.canonicalName, ep.tags?.join(" ")]
+        .filter(Boolean)
+        .join(" "),
+    })),
+    ...(user?.role !== "viewer"
+      ? [
+          { id: "action:powershell", kind: "action" as const, title: "Run PowerShell on computers", keywords: "script command run" },
+          { id: "action:starter", kind: "action" as const, title: "Browse starter scripts", keywords: "templates cleanup update printer bitlocker" },
+          { id: "action:add", kind: "action" as const, title: "Add a computer", keywords: "install enroll agent approve" },
+        ]
+      : []),
+  ];
+  const choosePaletteItem = (item: PaletteItem) => {
+    if (item.id.startsWith("page:")) changeView(item.id.slice(5) as View);
+    else if (item.id.startsWith("computer:")) {
+      const ep = endpoints.find((entry) => entry.id === item.id.slice(9));
+      if (ep) setDetail(ep);
+    } else if (item.id === "action:powershell")
+      setCommand({ kind: "powershell", ids: selected, script: "", path: "C:\\", chooseEndpoints: true });
+    else if (item.id === "action:starter") { changeView("scripts"); setStarterOpen(true); }
+    else if (item.id === "action:add") changeView("enrollment");
   };
   const renderEndpointTable = (compact = false) => (
     <div className="table-scroll">
@@ -801,6 +880,14 @@ function App() {
                 </td>
                 <td>
                   <Status status={ep.online ? "online" : "offline"} />
+                  {ep.inventory?.pendingReboot === true && (
+                    <span
+                      className="reboot-badge"
+                      title={(ep.inventory.pendingRebootReasons || []).join("\n") || "Windows reports a pending restart"}
+                    >
+                      Reboot pending
+                    </span>
+                  )}
                 </td>
                 <td className="mono muted">{ep.inventory?.ipv4?.[0] || "—"}</td>
                 {!compact && (
@@ -1006,6 +1093,14 @@ function App() {
             </span>
             <span className="topbar-divider" />
             <button
+              className="palette-hint"
+              title="Quick search (Ctrl+K)"
+              onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
+            >
+              <Search size={14} /> Search <kbd>Ctrl</kbd>
+              <kbd>K</kbd>
+            </button>
+            <button
               className="icon-button"
               title="Refresh workspace"
               aria-label="Refresh workspace"
@@ -1036,15 +1131,24 @@ function App() {
             </div>
             <div className="page-actions">
               {view === "scripts" ? (
-                <button
-                  className="button primary"
-                  onClick={() =>
-                    setScriptForm({ name: "", description: "", body: "" })
-                  }
-                >
-                  <Plus size={16} />
-                  New script
-                </button>
+                <>
+                  <button
+                    className="button secondary"
+                    onClick={() => setStarterOpen(true)}
+                  >
+                    <Sparkles size={16} />
+                    Starter scripts
+                  </button>
+                  <button
+                    className="button primary"
+                    onClick={() =>
+                      setScriptForm({ name: "", description: "", body: "" })
+                    }
+                  >
+                    <Plus size={16} />
+                    New script
+                  </button>
+                </>
               ) : view === "schedules" ? (
                 <button
                   className="button primary"
@@ -1432,6 +1536,10 @@ function App() {
                       ["online", "Online"],
                       ["offline", "Offline"],
                       ["attention", "Low storage"],
+                      [
+                        "reboot",
+                        `Needs reboot (${active.filter((ep) => ep.inventory?.pendingReboot === true).length})`,
+                      ],
                     ].map(([key, label]) => (
                       <button
                         key={key}
@@ -1446,7 +1554,7 @@ function App() {
                     <Search size={16} />
                     <input
                       aria-label="Search endpoints"
-                      placeholder="Search name, IP, domain…"
+                      placeholder="Search name, IP, user, OU…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                     />
@@ -1592,6 +1700,15 @@ function App() {
                 </p>
               </div>
             </>
+          )}
+          {view === "software" && (
+            <SoftwareInventory
+              endpoints={endpoints}
+              onOpenEndpoint={(id) => {
+                const ep = endpoints.find((item) => item.id === id);
+                if (ep) setDetail(ep);
+              }}
+            />
           )}
           {view === "schedules" && (
             <>
@@ -1740,14 +1857,43 @@ function App() {
                     </button>
                   ))}
                 </div>
-                <span className="muted">{jobs.length} jobs</span>
+                <div className="activity-tools">
+                  <div className="search-field">
+                    <Search size={15} />
+                    <input
+                      aria-label="Search activity"
+                      placeholder="Computer, command or result…"
+                      value={activitySearch}
+                      onChange={(e) => setActivitySearch(e.target.value)}
+                    />
+                  </div>
+                  <select
+                    aria-label="Job type"
+                    value={activityKind}
+                    onChange={(e) => setActivityKind(e.target.value)}
+                  >
+                    <option value="all">All types</option>
+                    <option value="powershell">PowerShell</option>
+                    <option value="terminal">Terminal</option>
+                    <option value="files">Files</option>
+                    <option value="reboot">Reboot</option>
+                    <option value="inventory">Inventory</option>
+                    <option value="other">Other</option>
+                  </select>
+                  <label className="activity-browsing">
+                    <input
+                      type="checkbox"
+                      checked={showBrowsing}
+                      onChange={(e) => setShowBrowsing(e.target.checked)}
+                    />
+                    Show folder browsing ({jobs.filter(isBrowsingJob).length})
+                  </label>
+                  <span className="muted">
+                    {activityJobs.length} of {jobs.length} jobs
+                  </span>
+                </div>
               </div>
-              {jobs.filter(
-                (j) =>
-                  filter === "all" ||
-                  (filter === "active" && isActiveJob(j)) ||
-                  j.status === filter,
-              ).length ? (
+              {activityJobs.length ? (
                 <div className="table-scroll">
                   <table>
                     <thead>
@@ -1761,13 +1907,7 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {jobs
-                        .filter(
-                          (j) =>
-                            filter === "all" ||
-                            (filter === "active" && isActiveJob(j)) ||
-                            j.status === filter,
-                        )
+                      {activityJobs
                         .map((job) => (
                           <tr key={job.id}>
                             <td>
@@ -2518,6 +2658,9 @@ function App() {
                           "Administrator requested reboot from Library RMM",
                       }
                     : { path: command.path },
+                command.kind === "powershell"
+                  ? (command.timeoutMinutes ?? 15) * 60
+                  : undefined,
               );
             }}
           >
@@ -2537,7 +2680,25 @@ function App() {
                   <span>
                     <Terminal size={15} /> Windows PowerShell
                   </span>
-                  <span>LocalSystem · Noninteractive</span>
+                  <span className="code-editor-meta">
+                    LocalSystem · Noninteractive ·
+                    <label className="inline-timeout">
+                      Timeout
+                      <select
+                        aria-label="Command timeout"
+                        value={command.timeoutMinutes ?? 15}
+                        onChange={(e) =>
+                          setCommand({ ...command, timeoutMinutes: Number(e.target.value) })
+                        }
+                      >
+                        {[5, 15, 30, 60, 120, 240].map((minutes) => (
+                          <option key={minutes} value={minutes}>
+                            {minutes < 60 ? `${minutes} min` : `${minutes / 60} h`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </span>
                 </div>
                 <textarea
                   className="code-editor"
@@ -2891,6 +3052,45 @@ function App() {
             }}
             request={api}
             canWrite={user.role !== "viewer"}
+          />
+        </Modal>
+      )}
+      <CommandPalette items={paletteItems} onSelect={choosePaletteItem} />
+      {starterOpen && (
+        <Modal
+          title="Starter scripts"
+          subtitle="Ready-made routines for common library IT tasks. Preview the code, add it to your library, or run it now."
+          wide
+          onClose={() => setStarterOpen(false)}
+        >
+          <StarterScripts
+            existingNames={scripts.map((script) => script.name)}
+            canEdit={user?.role !== "viewer"}
+            onAdd={async (template) => {
+              try {
+                await api("/scripts", "POST", {
+                  name: template.name,
+                  description: template.description,
+                  body: template.body,
+                });
+                notify(`"${template.name}" added to your script library.`);
+                await refresh();
+              } catch (err) {
+                fail(err);
+                throw err;
+              }
+            }}
+            onRun={(template) => {
+              setStarterOpen(false);
+              setCommand({
+                kind: "powershell",
+                ids: selected,
+                script: template.body,
+                path: "C:\\",
+                chooseEndpoints: true,
+                timeoutMinutes: template.id === "system-repair" ? 120 : 15,
+              });
+            }}
           />
         </Modal>
       )}
