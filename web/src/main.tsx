@@ -60,6 +60,8 @@ import { SoftwareInventory } from './SoftwareInventory';
 import { StarterScripts } from './StarterScripts';
 import { filterActivity, isBrowsingJob } from './activityFilter';
 import { CommandPalette } from './CommandPalette';
+import { FleetHealth } from './FleetHealth';
+import { scriptTemplates } from './scriptTemplates';
 import type { PaletteItem } from './commandPaletteModel';
 
 type Disk = {
@@ -1301,6 +1303,26 @@ function App() {
                   footer={`${jobs.filter((j) => j.status === "succeeded").length} completed successfully`}
                 />
               </div>
+              <FleetHealth
+                endpoints={active}
+                request={api}
+                canAct={user.role !== "viewer"}
+                onOpenEndpoint={(id) => {
+                  const ep = endpoints.find((item) => item.id === id);
+                  if (ep) setDetail(ep);
+                }}
+                onReboot={(ids) => openCommand("reboot", ids)}
+                onRefreshInventory={(ids) => void queueJobs(ids, "inventory", {})}
+                onCleanDisk={(ids) =>
+                  setCommand({
+                    kind: "powershell",
+                    ids,
+                    script: scriptTemplates.find((t) => t.id === "clean-temp")?.body ?? "",
+                    path: "C:\\",
+                    chooseEndpoints: true,
+                  })
+                }
+              />
               <div className="dashboard-grid">
                 <section className="panel fleet-panel">
                   <div className="panel-heading">
