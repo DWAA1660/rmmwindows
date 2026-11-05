@@ -124,6 +124,18 @@ function canonicalInventory(input, previousHostname) {
   };
 }
 
+export function agentUpdateScript(origin) {
+  const quoted = `'${origin.replaceAll("'", "''")}/install.ps1'`;
+  return [
+    "$ProgressPreference = 'SilentlyContinue'",
+    '[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12',
+    "$installer = Join-Path $env:TEMP ('Install-LibraryRmm-' + [guid]::NewGuid().ToString('N') + '.ps1')",
+    `Invoke-WebRequest -UseBasicParsing ${quoted} -OutFile $installer -TimeoutSec 60`,
+    "& (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $installer",
+    'if ($LASTEXITCODE -ne 0) { throw "Agent update could not start (exit code $LASTEXITCODE)." }',
+  ].join('\n');
+}
+
 export function createApp(options = {}) {
   const env = options.env || process.env;
   const databasePath = options.databasePath || env.DATABASE_PATH || resolve('data/rmm.db');
@@ -493,6 +505,33 @@ export function createApp(options = {}) {
       if (kind === 'files') audit(req.operator.username, `files.${payload.action}`, jobs.length === 1 ? jobs[0].id : null, { jobIds: jobs.map(job => job.id), endpointIds: ids, ...payload });
       return { jobs, runId, duplicate: false };
     }); res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  // One-click agent update. The script is fixed and written by the server, never by the browser.
+  // It runs the public bootstrap, which detects that it was started by the agent and continues
+  // in a one-time SYSTEM scheduled task, so stopping the service cannot kill the installer.
+  // Like every job it executes at most once; a second request while one is pending is refused.
+  admin.post('/endpoints/:id/update-agent', (req, res) => {
+    const endpoint = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);
+    if (!endpoint) fail(404, 'Endpoint not found.');
+    if (endpoint.revoked) fail(409, 'This endpoint is revoked.');
+    const idempotencyKey = str(req.body.idempotencyKey, 'idempotencyKey', { max: 128 });
+    const origin = new URL(env.PUBLIC_ORIGIN || 'https://rmm.parkcountylibrary.org').origin;
+    const payload = { script: agentUpdateScript(origin) };
+    const scopedKey = `${req.operator.user_id}:update-agent:${endpoint.id}:${idempotencyKey}`;
+    const result = transaction(db, () => {
+      const previous = db.prepare('SELECT * FROM job_requests WHERE idempotency_key=?').get(scopedKey);
+      if (previous) return { job: jobView(getJob(parse(previous.job_ids, [])[0])), duplicate: true };
+      const pending = db.prepare("SELECT id FROM jobs WHERE endpoint_id=? AND kind='powershell' AND payload=? AND status IN ('queued','dispatched','running') LIMIT 1").get(endpoint.id, JSON.stringify(payload));
+      if (pending) fail(409, 'An agent update for this computer is already queued or running.');
+      const job = insertJob(endpoint.id, 'powershell', payload, 900, req.operator.username);
+      const runId = randomUUID();
+      db.prepare('INSERT INTO job_runs VALUES (?,?,?,?)').run(runId, `${endpoint.display_name} · Agent update`, JSON.stringify([endpoint.id]), nowIso());
+      db.prepare('UPDATE jobs SET run_id=? WHERE id=?').run(runId, job.id);
+      db.prepare('INSERT INTO job_requests VALUES (?,?,?,?)').run(scopedKey, hashToken(JSON.stringify(payload)), JSON.stringify([job.id]), nowIso());
+      audit(req.operator.username, 'agent.update.requested', job.id, { endpointId: endpoint.id });
+      return { job: jobView(getJob(job.id)), duplicate: false };
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
   });
   admin.get('/runs',(req,res)=>{
     res.json(db.prepare('SELECT * FROM job_runs ORDER BY created_at DESC,id DESC LIMIT 100').all().map(run=>({id:run.id,name:run.name,createdAt:run.created_at,endpointCount:parse(run.endpoint_ids,[]).length,
