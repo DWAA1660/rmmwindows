@@ -455,7 +455,13 @@ internal static class SessionInfo
     public static bool IsLocked(int sessionId)
     {
         if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, 25, out var buffer, out var length)) return false;
-        try { return length >= 16 && Marshal.ReadInt32(buffer) == 1 && Marshal.ReadInt32(buffer, 12) == 0; }
+        try
+        {
+            if (length < 20) return false;
+            var header = new byte[20];
+            Marshal.Copy(buffer, header, 0, header.Length);
+            return SupportSessionFacts.IsLockedInfo(header);
+        }
         finally { WTSFreeMemory(buffer); }
     }
 

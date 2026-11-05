@@ -8,6 +8,13 @@ public static class SupportSelfTests
 {
     public static async Task RunAsync()
     {
+        var sessionInfo = new byte[20];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(sessionInfo, 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(sessionInfo.AsSpan(16), 1);
+        Assert(!SupportSessionFacts.IsLockedInfo(sessionInfo), "Active unlocked session was mistaken for locked.");
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(sessionInfo.AsSpan(16), 0);
+        Assert(SupportSessionFacts.IsLockedInfo(sessionInfo), "Actual session lock flag was ignored.");
+        Assert(!SupportSessionFacts.IsLockedInfo(sessionInfo.AsSpan(0, 16)), "Truncated lock information was accepted.");
         var now = DateTimeOffset.UtcNow;
         var bootstrap = new SupportBootstrap("https://rmm.example.test", new SupportGrant(Guid.NewGuid().ToString("D"), "test.operator", now.AddMinutes(20), true, new string('t', 43)), 1, 123);
         var relay = bootstrap.Validate(now);

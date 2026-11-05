@@ -13,6 +13,7 @@ internal static class AgentSelfTests
     {
         var tests = new (string Name, Func<Task> Run)[]
         {
+            ("support cleanup survives disconnected pipes and repeated disposal (no desktop access)", SupportLifecycleSelfTests.RunAsync),
             ("agent update diagnostics preserve safe failure evidence", UpdateDiagnosticsTests.RunAsync),
             ("endpoint directory and diagnostics inventory parsing (no domain access)", InventorySelfTests.RunAsync),
             ("stateful remote terminal boundaries and lifecycle (isolated local PowerShell)", TerminalSelfTests.RunAsync),
