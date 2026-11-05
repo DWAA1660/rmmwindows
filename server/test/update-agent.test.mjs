@@ -99,3 +99,62 @@ test("per-group automatic updates: default on, toggled by operators for any grou
   assert.equal((await f.request(`/groups/${frozen.data.id}`, 'DELETE', {}, f.admin)).status, 200);
   assert.equal((await manifest()).autoUpdate, true);
 });
+
+test('bulk update-agent queues one run, skips pending/revoked/unknown computers, replays by key and never requeues', async t => {
+  const f = await fixture(t);
+  const token = await f.request('/enrollment-tokens', 'POST', { label: 'Synthetic bulk update test', maxUses: 3, expiresInHours: 1 }, f.admin);
+  const enroll = async name => (await f.request('/agent/enroll', 'POST', { enrollmentToken: token.data.token, hostname: name, deviceId: name.toLowerCase() })).data.endpointId;
+  const second = await enroll('BULK-02'), third = await enroll('BULK-03'), revoked = await enroll('BULK-04');
+  assert.equal((await f.request(`/endpoints/${revoked}/revoke`, 'POST', {}, f.admin)).status, 200);
+  // One computer already has a pending update from the single-endpoint button.
+  const single = await f.request(`/endpoints/${third}/update-agent`, 'POST', { idempotencyKey: 'single' }, f.admin);
+  assert.equal(single.status, 201);
+  const unknown = '00000000-0000-4000-8000-000000000000';
+  const ids = [f.endpointId, second, third, revoked, unknown, second];
+  const bulk = await f.request('/endpoints/update-agent', 'POST', { endpointIds: ids, idempotencyKey: 'bulk-1' }, f.admin);
+  assert.equal(bulk.status, 201);
+  const byId = Object.fromEntries(bulk.data.results.map(row => [row.endpointId, row]));
+  assert.equal(bulk.data.results.length, 5, 'duplicate IDs collapse to one result');
+  assert.equal(byId[f.endpointId].status, 'queued'); assert.equal(byId[second].status, 'queued');
+  assert.equal(byId[third].status, 'skipped'); assert.match(byId[third].reason, /already queued or running/);
+  assert.equal(byId[revoked].status, 'skipped'); assert.match(byId[revoked].reason, /revoked/);
+  assert.equal(byId[unknown].status, 'skipped'); assert.equal(byId[unknown].endpointName, null);
+  const expected = agentUpdateScript('https://rmm.parkcountylibrary.org');
+  for (const id of [f.endpointId, second]) {
+    const job = byId[id].job;
+    assert.equal(job.kind, 'powershell'); assert.equal(job.status, 'queued');
+    assert.equal(JSON.parse(f.db.prepare('SELECT payload FROM jobs WHERE id=?').get(job.id).payload).script, expected, 'the same fixed server-written script');
+    assert.equal(f.db.prepare('SELECT run_id FROM jobs WHERE id=?').get(job.id).run_id, bulk.data.runId, 'both jobs share one run');
+  }
+  const run = await f.request(`/runs/${bulk.data.runId}`, 'GET', undefined, f.admin);
+  assert.equal(run.data.jobs.length, 2); assert.equal(run.data.name, 'Agent update · 2 computers');
+  const jobCount = () => f.db.prepare('SELECT count(*) n FROM jobs').get().n;
+  assert.equal(jobCount(), 3);
+
+  // An uncertain retry with the same key returns the original jobs and creates nothing.
+  const replay = await f.request('/endpoints/update-agent', 'POST', { endpointIds: ids, idempotencyKey: 'bulk-1' }, f.admin);
+  assert.equal(replay.status, 200); assert.equal(replay.data.duplicate, true); assert.equal(replay.data.runId, bulk.data.runId);
+  assert.deepEqual(replay.data.results.filter(row => row.status === 'queued').map(row => row.job.id).sort(), [byId[f.endpointId].job.id, byId[second].job.id].sort());
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: [second], idempotencyKey: 'bulk-1' }, f.admin)).status, 409, 'a key cannot be reused for another selection');
+  // A new click while those are pending skips every one of them.
+  const again = await f.request('/endpoints/update-agent', 'POST', { endpointIds: [f.endpointId, second, third], idempotencyKey: 'bulk-2' }, f.admin);
+  assert.equal(again.status, 201); assert.equal(again.data.runId, null);
+  assert.ok(again.data.results.every(row => row.status === 'skipped'));
+  assert.equal(jobCount(), 3);
+
+  // Finished or interrupted updates are never requeued; a new request makes a new job.
+  f.db.prepare("UPDATE jobs SET status='interrupted' WHERE id=?").run(byId[second].job.id);
+  const later = await f.request('/endpoints/update-agent', 'POST', { endpointIds: [second], idempotencyKey: 'bulk-3' }, f.admin);
+  assert.equal(later.data.results[0].status, 'queued'); assert.notEqual(later.data.results[0].job.id, byId[second].job.id);
+  assert.equal(f.db.prepare('SELECT status FROM jobs WHERE id=?').get(byId[second].job.id).status, 'interrupted');
+  assert.equal(f.db.prepare("SELECT count(*) n FROM audit WHERE action='agent.update.requested'").get().n, 4);
+
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: [], idempotencyKey: 'e' }, f.admin)).status, 400);
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: Array.from({ length: 251 }, (_, i) => `id-${i}`), idempotencyKey: 'big' }, f.admin)).status, 400);
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: [second] }, f.admin)).status, 400, 'an idempotency key is required');
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: [second], idempotencyKey: 'anon' })).status, 401);
+  assert.equal((await f.request('/users', 'POST', { username: 'bulk-viewer', role: 'viewer', password: 'synthetic-user-password', currentPassword: f.password }, f.admin)).status, 201);
+  const viewer = await f.login('bulk-viewer', 'synthetic-user-password');
+  assert.equal((await f.request('/endpoints/update-agent', 'POST', { endpointIds: [second], idempotencyKey: 'v' }, viewer)).status, 403);
+  assert.equal(jobCount(), 4);
+});

@@ -518,19 +518,20 @@ export function createApp(options = {}) {
   // It runs the public bootstrap, which detects that it was started by the agent and continues
   // in a one-time SYSTEM scheduled task, so stopping the service cannot kill the installer.
   // Like every job it executes at most once; a second request while one is pending is refused.
+  const agentUpdatePayload = () => ({ script: agentUpdateScript(new URL(env.PUBLIC_ORIGIN || 'https://rmm.parkcountylibrary.org').origin) });
+  const agentUpdatePending = (endpointId, payload) =>
+    Boolean(db.prepare("SELECT id FROM jobs WHERE endpoint_id=? AND kind='powershell' AND payload=? AND status IN ('queued','dispatched','running') LIMIT 1").get(endpointId, JSON.stringify(payload)));
   admin.post('/endpoints/:id/update-agent', (req, res) => {
     const endpoint = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);
     if (!endpoint) fail(404, 'Endpoint not found.');
     if (endpoint.revoked) fail(409, 'This endpoint is revoked.');
     const idempotencyKey = str(req.body.idempotencyKey, 'idempotencyKey', { max: 128 });
-    const origin = new URL(env.PUBLIC_ORIGIN || 'https://rmm.parkcountylibrary.org').origin;
-    const payload = { script: agentUpdateScript(origin) };
+    const payload = agentUpdatePayload();
     const scopedKey = `${req.operator.user_id}:update-agent:${endpoint.id}:${idempotencyKey}`;
     const result = transaction(db, () => {
       const previous = db.prepare('SELECT * FROM job_requests WHERE idempotency_key=?').get(scopedKey);
       if (previous) return { job: jobView(getJob(parse(previous.job_ids, [])[0])), duplicate: true };
-      const pending = db.prepare("SELECT id FROM jobs WHERE endpoint_id=? AND kind='powershell' AND payload=? AND status IN ('queued','dispatched','running') LIMIT 1").get(endpoint.id, JSON.stringify(payload));
-      if (pending) fail(409, 'An agent update for this computer is already queued or running.');
+      if (agentUpdatePending(endpoint.id, payload)) fail(409, 'An agent update for this computer is already queued or running.');
       const job = insertJob(endpoint.id, 'powershell', payload, 900, req.operator.username);
       const runId = randomUUID();
       db.prepare('INSERT INTO job_runs VALUES (?,?,?,?)').run(runId, `${endpoint.display_name} · Agent update`, JSON.stringify([endpoint.id]), nowIso());
@@ -538,6 +539,52 @@ export function createApp(options = {}) {
       db.prepare('INSERT INTO job_requests VALUES (?,?,?,?)').run(scopedKey, hashToken(JSON.stringify(payload)), JSON.stringify([job.id]), nowIso());
       audit(req.operator.username, 'agent.update.requested', job.id, { endpointId: endpoint.id });
       return { job: jobView(getJob(job.id)), duplicate: false };
+    });
+    res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  // Bulk form of the same fixed update job: one request, one run, one job per computer at most.
+  // Computers that already have an update pending, are revoked or unknown are skipped and reported;
+  // nothing is retried or requeued. A repeated idempotency key returns the original outcome.
+  admin.post('/endpoints/update-agent', (req, res) => {
+    const value = req.body.endpointIds;
+    if (!Array.isArray(value) || value.length < 1 || value.length > 250 || value.some(id => typeof id !== 'string' || id.length < 1 || id.length > 100)) fail(400, 'Select 1 to 250 endpoint IDs.');
+    const ids = [...new Set(value)];
+    const idempotencyKey = str(req.body.idempotencyKey, 'idempotencyKey', { max: 128 });
+    const payload = agentUpdatePayload();
+    const scopedKey = `${req.operator.user_id}:update-agent-bulk:${idempotencyKey}`;
+    const requestHash = hashToken(JSON.stringify({ ids: [...ids].sort(), payload }));
+    const nameOf = id => db.prepare('SELECT display_name FROM endpoints WHERE id=?').get(id)?.display_name ?? null;
+    const result = transaction(db, () => {
+      const previous = db.prepare('SELECT * FROM job_requests WHERE idempotency_key=?').get(scopedKey);
+      if (previous) {
+        if (previous.request_hash !== requestHash) fail(409, 'Idempotency key was already used for a different selection.');
+        const jobs = parse(previous.job_ids, []).map(id => jobView(getJob(id))).filter(Boolean);
+        const byEndpoint = new Map(jobs.map(job => [job.endpointId, job]));
+        const runId = jobs.length ? db.prepare('SELECT run_id FROM jobs WHERE id=?').get(jobs[0].id)?.run_id ?? null : null;
+        return { runId, duplicate: true, results: ids.map(id => byEndpoint.has(id)
+          ? { endpointId: id, endpointName: nameOf(id), status: 'queued', job: byEndpoint.get(id) }
+          : { endpointId: id, endpointName: nameOf(id), status: 'skipped', reason: 'Not queued by the original request.' }) };
+      }
+      const results = [];
+      for (const id of ids) {
+        const endpoint = db.prepare('SELECT * FROM endpoints WHERE id=?').get(id);
+        if (!endpoint) results.push({ endpointId: id, endpointName: null, status: 'skipped', reason: 'Endpoint not found.' });
+        else if (endpoint.revoked) results.push({ endpointId: id, endpointName: endpoint.display_name, status: 'skipped', reason: 'This endpoint is revoked.' });
+        else if (agentUpdatePending(id, payload)) results.push({ endpointId: id, endpointName: endpoint.display_name, status: 'skipped', reason: 'An agent update is already queued or running.' });
+        else results.push({ endpointId: id, endpointName: endpoint.display_name, status: 'queued', job: insertJob(id, 'powershell', payload, 900, req.operator.username) });
+      }
+      const queued = results.filter(row => row.status === 'queued');
+      let runId = null;
+      if (queued.length) {
+        runId = randomUUID();
+        db.prepare('INSERT INTO job_runs VALUES (?,?,?,?)').run(runId, `Agent update · ${queued.length} computer${queued.length === 1 ? '' : 's'}`, JSON.stringify(queued.map(row => row.endpointId)), nowIso());
+        for (const row of queued) {
+          db.prepare('UPDATE jobs SET run_id=? WHERE id=?').run(runId, row.job.id);
+          audit(req.operator.username, 'agent.update.requested', row.job.id, { endpointId: row.endpointId, bulk: true });
+        }
+      }
+      db.prepare('INSERT INTO job_requests VALUES (?,?,?,?)').run(scopedKey, requestHash, JSON.stringify(queued.map(row => row.job.id)), nowIso());
+      return { runId, duplicate: false, results: results.map(row => row.job ? { ...row, job: jobView(getJob(row.job.id)) } : row) };
     });
     res.status(result.duplicate ? 200 : 201).json(result);
   });
