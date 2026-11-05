@@ -9,7 +9,9 @@ public sealed record SupportGrant(string SessionId, string OperatorName, DateTim
 }
 
 /// <summary>Sent once over the protected service/user pipe; never a command-line or disk object.</summary>
-public sealed record SupportBootstrap(string ServerOrigin, SupportGrant Grant, int UserSessionId, int ServiceProcessId)
+/// <param name="SignInScreen">True when nobody is signed in: the service starts the helper as SYSTEM in the console
+/// session so it can show the Windows sign-in, lock and Ctrl+Alt+Delete screens.</param>
+public sealed record SupportBootstrap(string ServerOrigin, SupportGrant Grant, int UserSessionId, int ServiceProcessId, bool SignInScreen = false)
 {
     public static JsonSerializerOptions Json { get; } = new(JsonSerializerDefaults.Web);
     public Uri Validate(DateTimeOffset now)
@@ -25,6 +27,24 @@ public sealed record SupportBootstrap(string ServerOrigin, SupportGrant Grant, i
         return new UriBuilder(origin) { Scheme = "wss", Path = $"/api/support/{Grant.SessionId}/stream" }.Uri;
     }
     public override string ToString() => $"Attended support bootstrap {Grant.SessionId}";
+}
+
+/// <summary>What a sign-in-screen (SYSTEM) session does as the console's input desktop changes.</summary>
+public static class SignInScreenPolicy
+{
+    public enum Step { Continue, Wait, EndUserSignedIn }
+
+    /// <param name="inputDesktop">Name of the console's input desktop, or null when this session is not attached to the console.</param>
+    /// <param name="userSignedIn">Whether a user is signed in to the helper's Windows session.</param>
+    public static Step Decide(string? inputDesktop, bool userSignedIn, SupportGrant grant)
+    {
+        if (inputDesktop is null) return Step.Wait;
+        // Sign-in, lock, UAC and Ctrl+Alt+Delete screens all use the Winlogon desktop.
+        if (!userSignedIn || !string.Equals(inputDesktop, "Default", StringComparison.OrdinalIgnoreCase)) return Step.Continue;
+        // A person's own desktop is now showing. The SYSTEM helper has no approval notice or sharing
+        // indicator, so it may continue only when the administrator turned both off for this session.
+        return grant.ApprovalRequired || grant.ShowSessionDetails ? Step.EndUserSignedIn : Step.Continue;
+    }
 }
 
 public sealed record SupportDisplayGeometry(string Id, int Left, int Top, int Width, int Height)

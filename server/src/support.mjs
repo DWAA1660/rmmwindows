@@ -36,7 +36,9 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
     requestedControl: Boolean(row.requested_control), controlApproved: Boolean(row.control_approved), jobId: row.job_id,
     approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds,
     showSessionDetails: Boolean(row.show_session_details),
-    consentUser: row.consent_user || null, endedAt: row.ended_at || null, reason: row.end_reason || null });
+    consentUser: row.consent_user || null, endedAt: row.ended_at || null, reason: row.end_reason || null,
+    // The launch job's summary is the endpoint's explanation (e.g. nobody signed in); operators can already read it on the job.
+    launchSummary: row.end_reason === 'launch_failed' ? (db.prepare('SELECT summary FROM jobs WHERE id=?').get(row.job_id)?.summary || '').slice(0, 500) || null : null });
   const runtime = id => {
     if (!connections.has(id)) connections.set(id, { paused: false, reason: null,
       capabilities: { type: 'capabilities', secureAttention: false, secureDesktop: false }, attentionIds: new Set(), displays: [] });
@@ -269,7 +271,9 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
           }
           if (message.type === 'consent') {
             if (current.status !== 'awaiting_consent' || typeof message.approved !== 'boolean' || typeof message.control !== 'boolean' || typeof message.userName !== 'string' || message.userName.length > 200) return end(row.id, 'failed', 'invalid_consent');
-            if (message.decision !== undefined && !['manual', 'automatic', 'unattended'].includes(message.decision)) return end(row.id, 'failed', 'invalid_consent');
+            // signin_screen: nobody is signed in, so the agent's SYSTEM helper shows the Windows sign-in screen and there is no person to notify.
+            if (message.decision !== undefined && !['manual', 'automatic', 'unattended', 'signin_screen'].includes(message.decision)) return end(row.id, 'failed', 'invalid_consent');
+            if (message.decision === 'signin_screen' && !message.approved) return end(row.id, 'failed', 'invalid_consent');
             if (message.decision === 'unattended' && current.approval_required) return end(row.id, 'failed', 'invalid_consent');
             audit(`agent:${row.endpoint_id}`, 'support.consent', row.id, { approved: message.approved, control: message.approved && message.control && Boolean(current.requested_control), decision: message.decision || 'manual' });
             if (!message.approved) return end(row.id, 'declined', 'staff_declined');

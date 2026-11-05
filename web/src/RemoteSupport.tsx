@@ -23,6 +23,7 @@ import {
   XCircle,
 } from "lucide-react";
 import "./RemoteSupport.css";
+import { supportEndReason } from "./supportEndReason";
 
 type SupportStatus =
   | "requested"
@@ -45,6 +46,9 @@ export type SupportSession = {
   approvalSeconds: number;
   showSessionDetails: boolean;
   jobId?: string;
+  reason?: string | null;
+  launchSummary?: string | null;
+  consentUser?: string | null;
 };
 type SupportInput = {
   type: "input";
@@ -565,7 +569,12 @@ export function RemoteSupport() {
             setError(
               "The support connection closed. Control is released; this window will not reconnect automatically.",
             );
-          void readState();
+          // A relay that refuses an already-ended session closes before any state arrives.
+          // Once the server confirms the end, its reason replaces the generic banner.
+          void readState().then(() => {
+            if (!disposed.current && terminal(currentSession.current?.status))
+              setError("");
+          });
         };
         statePoll = window.setInterval(() => void readState(), 5000);
       } catch (err) {
@@ -893,6 +902,9 @@ export function RemoteSupport() {
     switchingDisplay ||
     ["requested", "awaiting_consent"].includes(session?.status || "");
   const ended = terminal(session?.status) || localStopped;
+  const endReason = terminal(session?.status) ? supportEndReason(session) : "";
+  // Set by the agent's SYSTEM helper when nobody was signed in to the computer.
+  const signInScreen = session?.consentUser === "Windows sign-in screen";
   const showOverlay = !hasFrame || paused || stale || ended || switchingDisplay;
   const overlayTitle = ended
     ? statusText
@@ -955,7 +967,11 @@ export function RemoteSupport() {
           {ended
             ? "This session is closed. No desktop is displayed and remote input is disabled."
             : session?.status === "active"
-              ? showSessionDetails
+              ? signInScreen
+                ? showSessionDetails || approvalRequired
+                  ? "Showing the Windows sign-in screen without a notice or banner. The session ends when someone signs in. Ctrl+Alt+Shift+F12 ends it locally."
+                  : "Showing the Windows sign-in screen without a notice or banner; it continues if someone signs in. Ctrl+Alt+Shift+F12 ends it locally."
+                : showSessionDetails
                 ? "The staff computer keeps a visible sharing indicator. Ctrl+Alt+Shift+F12 ends sharing locally."
                 : "No staff banner or icon is shown for this session. Ctrl+Alt+Shift+F12 still ends sharing locally."
               : !session
@@ -1013,7 +1029,9 @@ export function RemoteSupport() {
                 ? "Native Ctrl+Alt+Delete is unavailable on this endpoint."
                 : !controlEnabled
                   ? "Enable remote control to request Ctrl+Alt+Delete."
-                  : "Request the Windows security screen. Viewing and control pause on protected desktops."
+                  : signInScreen
+                    ? "Send Ctrl+Alt+Delete to the computer's Windows sign-in screen."
+                    : "Request the Windows security screen. Viewing and control pause on protected desktops."
             }
           >
             {secureAttentionPending ? (
@@ -1099,10 +1117,9 @@ export function RemoteSupport() {
       <div className="rs-security-note" id="rs-security-limits">
         <LockKeyhole size={13} />
         <span>
-          Ctrl+Alt+Delete requests the Windows security screen. Viewing and
-          control pause there until someone returns to the regular desktop.
-          Windows policy must allow service-generated secure attention; this app
-          does not change it.
+          {signInScreen
+            ? "Nobody was signed in (or the computer was locked), so this session shows the Windows sign-in screen. Viewing and control continue on the sign-in, lock and Ctrl+Alt+Delete screens. Windows policy must allow service-generated Ctrl+Alt+Delete; this app does not change it."
+            : "Ctrl+Alt+Delete requests the Windows security screen. Viewing and control pause there until someone returns to the regular desktop. Windows policy must allow service-generated secure attention; this app does not change it."}
         </span>
       </div>
       {secureAttentionFeedback && (
@@ -1177,7 +1194,7 @@ export function RemoteSupport() {
             <h1>{overlayTitle}</h1>
             <p>
               {ended
-                ? "The desktop is hidden and remote input is disabled. Start a new session from the endpoint if more help is needed."
+                ? `${endReason ? endReason + " " : ""}The desktop is hidden and remote input is disabled. Start a new session from the endpoint if more help is needed.`
                 : switchingDisplay
                   ? "The previous image is cleared and remote input is released. Viewing resumes only after the selected monitor is confirmed and sends a fresh frame. Enable control again when you are ready."
                   : paused
@@ -1267,8 +1284,9 @@ export function RemoteSupport() {
           )}
         </span>
         <span className="rs-footer-limit">
-          No clipboard or file transfer · Protected Windows prompts cannot be
-          controlled
+          {signInScreen
+            ? "No clipboard or file transfer"
+            : "No clipboard or file transfer · Protected Windows prompts cannot be controlled"}
         </span>
       </footer>
     </div>

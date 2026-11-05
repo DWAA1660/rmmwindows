@@ -220,8 +220,8 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     // every command. This job reports launch; the separately scoped live session
                     // ends on staff refusal, expiry, disconnect or service cancellation.
                     var launched = await SupportLauncher.LaunchAsync(configuration, api, job, ct);
-                    await journal.AppendAsync("system", "Staff notification launched. Remote support remains visible and can be declined; no job will be replayed.\n");
-                    await journal.CompleteAsync(new JobCompletion("succeeded", 0, "Remote support notification launched; inspect the support window for session status."));
+                    await journal.AppendAsync("system", launched.Summary + " No job will be replayed.\n");
+                    await journal.CompleteAsync(new JobCompletion("succeeded", 0, "Remote support helper launched; inspect the support window for session status."));
                     break;
                 }
                 case "reboot":
@@ -244,6 +244,12 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
         catch (OperationCanceledException)
         {
             await journal.CompleteAsync(new JobCompletion("interrupted", null, "Agent stopped or job deadline elapsed; execution will not be retried."));
+        }
+        catch (SupportLaunchException exception)
+        {
+            // Fixed operator-facing text: the support window shows this summary as the reason.
+            await journal.AppendAsync("system", $"Remote support could not start [{exception.Code}]: {exception.Message} Execution will not be retried.\n");
+            await journal.CompleteAsync(new JobCompletion("failed", null, "Remote support could not start: " + exception.Message));
         }
         catch (Exception exception)
         {
