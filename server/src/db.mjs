@@ -46,6 +46,17 @@ export function openDatabase(filename) {
     CREATE TABLE IF NOT EXISTS file_transfer_chunks (job_id TEXT NOT NULL REFERENCES file_transfers(job_id), sequence INTEGER NOT NULL,
       byte_offset INTEGER NOT NULL, length INTEGER NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(job_id, sequence));
     PRAGMA user_version=4;`);
+  // v5: every enrolled endpoint belongs to one organizational group.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS endpoint_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+      INSERT OR IGNORE INTO endpoint_groups(id,name,created_at) VALUES ('new-endpoints','New endpoints',strftime('%Y-%m-%dT%H:%M:%fZ','now'));`);
+    if (!db.prepare('PRAGMA table_info(endpoints)').all().some(column => column.name === 'group_id'))
+      db.exec("ALTER TABLE endpoints ADD COLUMN group_id TEXT NOT NULL DEFAULT 'new-endpoints'");
+    db.exec('CREATE INDEX IF NOT EXISTS endpoints_group ON endpoints(group_id); PRAGMA user_version=5;');
+    db.exec('CREATE TABLE IF NOT EXISTS job_runs (id TEXT PRIMARY KEY,name TEXT NOT NULL,endpoint_ids TEXT NOT NULL,created_at TEXT NOT NULL);');
+    if (!db.prepare('PRAGMA table_info(jobs)').all().some(column => column.name === 'run_id')) db.exec('ALTER TABLE jobs ADD COLUMN run_id TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS jobs_run ON jobs(run_id);');
+  });
   return db;
 }
 

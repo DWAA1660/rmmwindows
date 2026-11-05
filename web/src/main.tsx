@@ -43,6 +43,7 @@ import {
   XCircle,
 } from "lucide-react";
 import "./styles.css";
+import {EndpointGroups,type EndpointGroup} from './EndpointGroups';
 import { AccountSettings, type AccountUser } from './AccountSettings';
 import { progressOutput } from './progress';
 import { JoinRequests, type JoinRequest } from './JoinRequests';
@@ -80,6 +81,8 @@ type Inventory = {
   software?: Software[];
 };
 type Endpoint = {
+  groupId?: string;
+  groupName?: string;
   id: string;
   hostname: string;
   displayName?: string;
@@ -488,6 +491,8 @@ function App() {
     ),
     [tokens, setTokens] = useState<Record<string, unknown>[]>([]),
     [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
+  const [groups,setGroups]=useState<EndpointGroup[]>([]),[groupFilter,setGroupFilter]=useState('all');
+  const [runs,setRuns]=useState<{id:string;name:string;createdAt:string;endpointCount:number;counts:Record<string,number>}[]>([]);
   const [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
@@ -555,6 +560,8 @@ function App() {
       setJobs(js);
       setScripts(ss);
       setSchedules(sc);
+      setGroups(await api<EndpointGroup[]>('/groups'));
+      setRuns(await api('/runs'));
       // Polled with everything else so the "Add endpoints" badge shows waiting computers.
       api<JoinRequest[]>("/join-requests").then(setJoinRequests).catch(() => {});
       setLastRefresh(new Date().toISOString());
@@ -608,6 +615,7 @@ function App() {
       ep.inventory?.disks?.some((d) => usedPercent(d) >= 85),
     );
   const filtered = active
+    .filter(ep=>view!=='endpoints'||groupFilter==='all'||ep.groupId===groupFilter)
     .filter((ep) =>
       `${endpointName(ep)} ${ep.hostname} ${ep.inventory?.ipv4?.join(" ")} ${ep.inventory?.domain} ${ep.tags?.join(" ")}`
         .toLowerCase()
@@ -641,6 +649,7 @@ function App() {
         payload,
         timeoutSeconds: kind === "storage" ? 900 : 300,
         idempotencyKey: crypto.randomUUID(),
+        runName: `${(()=>{const names=[...new Set(active.filter(ep=>ids.includes(ep.id)).map(ep=>ep.groupName||'New endpoints'))];return names.length===1?names[0]:'Selected endpoints';})()} · ${kind}`,
       });
       notify(
         `${result.jobs.length} ${result.jobs.length === 1 ? "job" : "jobs"} queued. Each job can execute only once.`,
@@ -649,8 +658,7 @@ function App() {
       await refresh();
       if (result.jobs.length === 1) setJobDetail(result.jobs[0]);
       // Several computers: show every result live side by side.
-      else if (kind === "powershell") setBatch(result.jobs);
-      else changeView("activity");
+      else setBatch(result.jobs);
     } catch (err) {
       fail(err);
     } finally {
@@ -781,6 +789,7 @@ function App() {
                       <strong>{endpointName(ep)}</strong>
                       <small>
                         {ep.inventory?.osName || "Windows · Awaiting inventory"}
+                        {!compact && <span className="endpoint-group-label"> · {ep.groupName||'New endpoints'}</span>}
                       </small>
                     </span>
                   </button>
@@ -1395,6 +1404,7 @@ function App() {
           )}
           {view === "endpoints" && (
             <>
+              <EndpointGroups groups={groups} current={groupFilter} onChange={id=>{setGroupFilter(id);setSelected([]);}} members={active} selected={selected} onSelect={setSelected} request={api} refresh={refresh} onError={fail} readOnly={user.role==='viewer'} onAdd={()=>changeView('enrollment')} onRun={(kind,ids)=>{setSelected(ids);if(kind==='inventory')void queueJobs(ids,kind,{});else openCommand(kind,ids);}}/>
               <div className="inline-stats">
                 <span>
                   <i className="status-dot green" />
@@ -1706,6 +1716,8 @@ function App() {
           )}
           {view === "activity" && (
             <section className="panel">
+              <div className="panel-heading"><div><h2>Recent runs</h2><p>Reopen a run to compare every computer’s result and complete output.</p></div></div>
+              <div className="recent-runs">{runs.slice(0,20).map(run=><button key={run.id} className="run-link" onClick={()=>void api<{jobs:Job[]}>(`/runs/${run.id}`).then(result=>{if(result.jobs.length===1)setJobDetail(result.jobs[0]);else setBatch(result.jobs);}).catch(fail)}><strong>{run.name}</strong><span>{run.endpointCount} computers · {when(run.createdAt)}</span><small>{Object.entries(run.counts).map(([status,count])=>`${count} ${status}`).join(' · ')}</small><span>View results →</span></button>)}{!runs.length&&<p className="muted">New actions will appear here as runs.</p>}</div>
               <div className="table-toolbar">
                 <div className="tabs">
                   {[

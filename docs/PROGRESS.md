@@ -147,6 +147,14 @@
 - Unsigned PowerShell installer package; signed MSI/EXE and Action1 integration remain later.
 - Uncertain dispatched/running jobs stay consumed. There is no automatic inference of success or replay. Older server-database restoration requires pending-job reconciliation before reconnecting agents.
 
+## 2026-11-04 — Endpoint groups and bulk results
+
+- User clarified: create groups only; retain normal installer/approval flow. Permanent default New endpoints contains existing endpoints on migration and receives new approved/token-enrolled devices.
+- Added schema v5, group create/rename/description/delete, atomic bulk moves, active/online counts, protected default group, case-insensitive unique names and role/audit enforcement. Deleting a group moves endpoints back to New endpoints (or specified destination); never deletes agents/history or changes jobs.
+- Endpoints UI has group filters, full-group selection, PowerShell/inventory/reboot actions, bulk move controls and group labels. Script run picker supports selecting entire groups, including offline members (queued work runs on reconnect). Up to250 per job request; up to10000 per move.
+- Persisted run snapshots and Activity → Recent runs allow reopening all per-computer results after closing the initial results board. Board now supports every bulk job kind, not only PowerShell. All complete job output/downloads retained.
+- Local verification:19server tests pass (new group lifecycle/default enrollment/atomic move/default protection/viewer denial/run snapshot and idempotency/output recovery coverage); TypeScript/production build passes. Deployment and browser checks pending. No agent changes required.
+
 ## Collaboration rules
 
 Each contributor owns separate paths; record shipped features, test commands/results, unresolved risks here or a dedicated docs/HANDOFF-*.md. Keep API.md aligned with final behavior. Do not commit secrets. At-most-once dispatch and nontruncated output are required invariants.

@@ -39,6 +39,10 @@ Files payload (remote file explorer; requested by the user 2026-11-04). One oper
 
 ## Operator protocol (owned by server + web)
 
+Endpoint groups (organizational, not per-group access control): `GET /groups`, `POST /groups {name,description?}`, `PATCH /groups/:id {name,description?}`, `DELETE /groups/:id {moveToGroupId?}` and `POST /groups/:id/members {endpointIds}`. Admin/operator mutations; viewers read only. Names are unique case-insensitively. Permanent `new-endpoints` / “New endpoints” receives new token-enrolled/approved agents and existing endpoints at migration. Each endpoint has `groupId,groupName`. Bulk moves validate all active endpoints before changing anything; up to10000 per move. Deleting a custom group moves all its endpoints to the selected group (default New endpoints), without deleting endpoints/history. The default cannot be renamed/deleted.
+
+Every `POST /jobs` now creates a persisted run with a snapshot of endpoint IDs; optional `runName` (max150). Existing job limits remain250 per action. `GET /runs` lists the latest100 runs with status counts, and `GET /runs/:id` returns all jobs and original targets. Idempotent job retries do not create another run. Group selection expands to explicit IDs before launching, so later membership changes do not alter an existing run. Script/inventory/reboot multi-computer results use the same live results board; full output remains accessible per job.
+
 Accounts: `auth/me` and login return `{id,username,email,role,disabled}` in `user`. Username login is case-insensitive; email is contact-only with no delivery/reset-email service. Roles: `admin` full access including users/audit/app updates; `operator` endpoint/script/schedule actions; `viewer` read-only fleet/output. Own-account routes are available to all enabled roles.
 
 - `PATCH /account {email,currentPassword}` changes own email.

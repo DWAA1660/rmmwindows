@@ -3574,6 +3574,23 @@ td:last-child {
 
 .agent-installer { margin-bottom: 24px; }
 .account-settings { margin-bottom:24px; }
+.endpoint-groups { margin-bottom:24px; }
+.group-tabs {display:flex;gap:10px;flex-wrap:wrap;padding:0 22px 20px;}
+.group-tabs button {display:flex;flex-direction:column;gap:6px;min-width:155px;text-align:left;padding:14px;border:1px solid #dce7e3;border-radius:8px;background:#f8fbfa;}
+.group-tabs button.active {border-color:#168376;background:#e6f3ed;color:#126b5f;}
+.group-tabs span {font-size:11px;color:#6f8787;}
+.group-actions,.group-move,.picker-groups {display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:0 22px 20px;}
+.group-actions strong {margin-right:auto;}
+.group-move {padding-top:15px;border-top:1px solid #e3ece8;}
+.group-move label {min-width:230px;}
+.group-editor {padding:20px;margin:0 22px 22px;background:#f4f9f6;border-radius:8px;display:grid;gap:15px;}
+.group-editor .button {margin-right:10px;}
+.group-note {padding:0 22px 15px;font-size:12px;color:#687f80;}
+.endpoint-group-label {color:#168376;}
+.picker-groups {padding:12px 0;font-size:12px;}
+.recent-runs {display:flex;gap:12px;overflow-x:auto;padding:0 22px 22px;}
+.run-link {flex:0 0 250px;display:flex;flex-direction:column;gap:8px;text-align:left;padding:16px;border:1px solid #deebe5;border-radius:8px;background:#f5faf7;}
+.run-link span,.run-link small {font-size:11px;color:#627f7b;}
 .live-job-progress { display:flex;align-items:center;gap:15px;padding:12px 16px;background:#edf6f1;color:#31665a;font-size:12px; }
 .live-job-progress progress { flex:1;accent-color:#168376;height:10px; }
 .account-forms { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:28px;padding:0 23px 23px; }

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
 
-type PickerEndpoint = { id: string; hostname: string; displayName?: string; online: boolean; tags?: string[] };
+type PickerEndpoint = { id: string; hostname: string; displayName?: string; online: boolean; tags?: string[]; groupId?:string;groupName?:string };
 
 /** Checkbox list for choosing one or many computers for a job. */
 export function EndpointPicker({ endpoints, value, onChange }: {
@@ -18,8 +18,10 @@ export function EndpointPicker({ endpoints, value, onChange }: {
   const chosen = new Set(value);
   const toggle = (id: string) => onChange(chosen.has(id) ? value.filter(v => v !== id) : [...value, id]);
   const online = endpoints.filter(ep => ep.online).map(ep => ep.id);
+  const groups = [...new Map(endpoints.map(ep=>[ep.groupId||'new-endpoints',ep.groupName||'New endpoints'])).entries()];
   return (
     <div className="endpoint-picker">
+      <div className="picker-groups"><span>Select whole groups:</span>{groups.map(([id,name])=>{const ids=endpoints.filter(ep=>(ep.groupId||'new-endpoints')===id).map(ep=>ep.id);return <button type="button" className="button small secondary" key={id} onClick={()=>onChange([...new Set([...value,...ids])])}>{name} ({ids.length})</button>;})}</div>
       <div className="endpoint-picker-bar">
         <label className="endpoint-picker-search"><Search size={14} /><input aria-label="Filter computers" placeholder="Filter by name or tag" value={query} onChange={e => setQuery(e.target.value)} /></label>
         <button type="button" className="button small secondary" onClick={() => onChange([...new Set([...value, ...online])])} disabled={!online.length}>Select all online ({online.length})</button>

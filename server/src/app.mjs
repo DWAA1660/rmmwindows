@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase, transaction } from './db.mjs';
 import { mountAgentDownloads } from './downloads.mjs';
+import { mountGroups } from './groups.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
@@ -139,7 +140,7 @@ export function createApp(options = {}) {
     if (!endpoint) return res.status(401).json({ error: 'Invalid or revoked agent credential.' });
     req.endpoint = endpoint; next();
   }
-  const endpointView = row => row && ({ id: row.id, hostname: row.hostname, displayName: row.display_name, deviceId: row.device_id, tags: parse(row.tags, []), inventory: parse(row.inventory), bootId: row.boot_id, lastSeen: row.last_seen, createdAt: row.created_at, revoked: Boolean(row.revoked), online: !row.revoked && Date.now() - Date.parse(row.last_seen) < 120000 });
+  const endpointView = row => row && ({ id: row.id, hostname: row.hostname, displayName: row.display_name, deviceId: row.device_id, groupId:row.group_id, groupName:db.prepare('SELECT name FROM endpoint_groups WHERE id=?').get(row.group_id)?.name || 'New endpoints', tags: parse(row.tags, []), inventory: parse(row.inventory), bootId: row.boot_id, lastSeen: row.last_seen, createdAt: row.created_at, revoked: Boolean(row.revoked), online: !row.revoked && Date.now() - Date.parse(row.last_seen) < 120000 });
   const jobView = row => row && ({ id: row.id, endpointId: row.endpoint_id, endpointName: row.endpoint_name, kind: row.kind, payload: parse(row.payload), timeoutSeconds: row.timeout_seconds, status: row.status, createdAt: row.created_at, dispatchedAt: row.dispatched_at, startedAt: row.started_at, completedAt: row.completed_at, exitCode: row.exit_code, summary: row.summary, createdBy: row.created_by });
   const getJob = id => db.prepare('SELECT j.*, e.display_name endpoint_name FROM jobs j JOIN endpoints e ON e.id=j.endpoint_id WHERE j.id=?').get(id);
   const scriptView = row => row && ({ id: row.id, name: row.name, description: row.description, body: row.body, updatedAt: row.updated_at });
@@ -353,6 +354,7 @@ export function createApp(options = {}) {
     next();
   });
   admin.get('/endpoints', (req, res) => res.json(db.prepare('SELECT * FROM endpoints ORDER BY display_name COLLATE NOCASE').all().map(endpointView)));
+  mountGroups(admin, {db,audit,fail,str});
   admin.get('/endpoints/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);
     if (!row) fail(404, 'Endpoint not found.'); res.json(endpointView(row));
@@ -395,7 +397,8 @@ export function createApp(options = {}) {
     const payload = validatePayload(kind, req.body.payload || {});
     const timeoutSeconds = integer(req.body.timeoutSeconds, 'timeoutSeconds', 10, 86400, 900);
     const idempotencyKey = req.body.idempotencyKey === undefined ? null : str(req.body.idempotencyKey, 'idempotencyKey', { max: 128 });
-    const requestHash = hashToken(JSON.stringify({ ids: [...ids].sort(), kind, payload, timeoutSeconds }));
+    const runName = str(req.body.runName,'runName',{max:150,fallback:kind});
+    const requestHash = hashToken(JSON.stringify({ ids: [...ids].sort(), kind, payload, timeoutSeconds,runName }));
     const scopedKey = idempotencyKey ? `${req.operator.user_id}:${idempotencyKey}` : null;
     const result = transaction(db, () => {
       if (scopedKey) {
@@ -406,12 +409,23 @@ export function createApp(options = {}) {
         }
       }
       const jobs = ids.map(id => insertJob(id, kind, payload, timeoutSeconds, req.operator.username));
+      const runId = randomUUID();
+      db.prepare('INSERT INTO job_runs VALUES (?,?,?,?)').run(runId,runName,JSON.stringify(ids),nowIso());
+      for(const job of jobs) db.prepare('UPDATE jobs SET run_id=? WHERE id=?').run(runId,job.id);
       if (scopedKey) db.prepare('INSERT INTO job_requests VALUES (?,?,?,?)').run(scopedKey, requestHash, JSON.stringify(jobs.map(job => job.id)), nowIso());
       audit(req.operator.username, 'jobs.created', null, { jobIds: jobs.map(job => job.id), kind, endpointIds: ids });
       // File explorer operations get their own audit entry with the exact paths involved.
       if (kind === 'files') audit(req.operator.username, `files.${payload.action}`, jobs.length === 1 ? jobs[0].id : null, { jobIds: jobs.map(job => job.id), endpointIds: ids, ...payload });
-      return { jobs, duplicate: false };
+      return { jobs, runId, duplicate: false };
     }); res.status(result.duplicate ? 200 : 201).json(result);
+  });
+  admin.get('/runs',(req,res)=>{
+    res.json(db.prepare('SELECT * FROM job_runs ORDER BY created_at DESC,id DESC LIMIT 100').all().map(run=>({id:run.id,name:run.name,createdAt:run.created_at,endpointCount:parse(run.endpoint_ids,[]).length,
+      counts:Object.fromEntries(db.prepare('SELECT status,count(*) n FROM jobs WHERE run_id=? GROUP BY status').all(run.id).map(row=>[row.status,row.n]))})));
+  });
+  admin.get('/runs/:id',(req,res)=>{
+    const run=db.prepare('SELECT * FROM job_runs WHERE id=?').get(req.params.id);if(!run) fail(404,'Run not found.');
+    res.json({id:run.id,name:run.name,createdAt:run.created_at,endpointIds:parse(run.endpoint_ids,[]),jobs:db.prepare('SELECT id FROM jobs WHERE run_id=? ORDER BY created_at,id').all(run.id).map(row=>jobView(getJob(row.id)))});
   });
   admin.get('/jobs/:id', (req, res) => { const job = getJob(req.params.id); if (!job) fail(404, 'Job not found.'); res.json(jobView(job)); });
   admin.post('/jobs/:id/cancel', (req, res) => {
