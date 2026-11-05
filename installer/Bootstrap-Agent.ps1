@@ -91,7 +91,7 @@ if ($HandoffTaskName) {
     $command = "Start-Transcript -LiteralPath '" + $log.Replace("'", "''") + "' | Out-Null; try { & '" + $handoffScript.Replace("'", "''") + "' -ServerUrl '" + $origin.Replace("'", "''") + "' -HandoffTaskName '" + $taskName + "'; `$code = 0 } catch { Write-Host ('Update failed: ' + `$_.Exception.Message); `$code = 1 } finally { try { `$s = Get-Service -Name 'LibraryRmmAgent' -ErrorAction SilentlyContinue; if (`$s -and `$s.Status -ne 'Running') { Start-Service -Name 'LibraryRmmAgent' -ErrorAction SilentlyContinue } } catch { }; try { Unregister-ScheduledTask -TaskName '" + $taskName + "' -Confirm:`$false -ErrorAction Stop } catch { }; Stop-Transcript | Out-Null }; exit `$code"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $action = New-ScheduledTaskAction -Execute $powershellExe -Argument ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded)
-    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Description 'One-time Library RMM agent update started from the RMM console. Removes itself when it starts.' | Out-Null
     Start-ScheduledTask -TaskName $taskName

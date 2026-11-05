@@ -78,7 +78,9 @@ if ($principalCheck.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     if ($global:LibraryRmmBootstrapTestState.started -ne $registered.name) { throw 'Handoff task was registered but not started.' }
     if (Test-Path -LiteralPath $sentinel) { throw 'Bootstrap ran the installer inside the RMM job.' }
     if ($global:LibraryRmmBootstrapTestState.downloadCount -ne $before) { throw 'Bootstrap downloaded inside the RMM job instead of in the detached task.' }
-    if ($registered.principal.UserId -ne 'S-1-5-18') { throw 'Handoff task does not run as SYSTEM.' }
+    $taskUser = [string]$registered.principal.UserId
+    $taskSid = if ($taskUser -match '^S-1-') { $taskUser } else { (New-Object Security.Principal.NTAccount($taskUser)).Translate([Security.Principal.SecurityIdentifier]).Value }
+    if ($taskSid -ne 'S-1-5-18' -or [string]$registered.principal.LogonType -ne 'ServiceAccount') { throw ('Handoff task does not run as SYSTEM: ' + $taskUser + ' / ' + $registered.principal.LogonType) }
     $encoded = ($registered.action.Arguments -split ' ')[-1]
     $command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
     if ($command -notmatch [regex]::Escape("-HandoffTaskName '" + $registered.name + "'") -or $command -notmatch 'Unregister-ScheduledTask' -or $command -notmatch "Start-Service -Name 'LibraryRmmAgent'") {
