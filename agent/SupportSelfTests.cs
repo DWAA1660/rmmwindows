@@ -18,6 +18,7 @@ public static class SupportSelfTests
         Reject(() => (bootstrap with { Grant = bootstrap.Grant with { Credential = "short" } }).Validate(now));
         Reject(() => (bootstrap with { Grant = bootstrap.Grant with { ApprovalSeconds = 0 } }).Validate(now));
         Reject(() => (bootstrap with { Grant = bootstrap.Grant with { ApprovalSeconds = 301 } }).Validate(now));
+        (bootstrap with { Grant = bootstrap.Grant with { ApprovalRequired = false, ShowSessionDetails = false } }).Validate(now);
         var desktop = true;
         var captures = 0; var inputs = 0;
         var gate = new SupportPermissionGate(bootstrap, () => now, () => desktop);
@@ -50,7 +51,7 @@ public static class SupportSelfTests
         now = bootstrap.Grant.ExpiresAt.AddMinutes(-10);
         var countdown = new SupportPermissionGate(bootstrap, () => now, () => desktop);
         Assert(!countdown.ApproveAfterVisibleCountdown(true), "Countdown auto-approved without a visible notice.");
-        Assert(countdown.BeginVisibleCountdown(), "Visible notice did not start countdown.");
+        Assert(countdown.BeginLocalAccessPolicy(), "Visible notice did not start countdown.");
         now = now.AddSeconds(14);
         Assert(!countdown.ApproveAfterVisibleCountdown(true) && !countdown.TryCapture(() => captures++), "Screen access occurred before 15 seconds.");
         now = now.AddSeconds(1);
@@ -58,23 +59,23 @@ public static class SupportSelfTests
         countdown.End(); // Same irreversible gate used by the local emergency hotkey.
         Assert(!countdown.TryCapture(() => captures++) && !countdown.TryInput(() => inputs++) && !countdown.ResumeLocally(), "Emergency end was revived.");
         var declined = new SupportPermissionGate(bootstrap, () => now, () => true);
-        Assert(declined.BeginVisibleCountdown(), "Decline test notice failed.");
+        Assert(declined.BeginLocalAccessPolicy(), "Decline test notice failed.");
         declined.End(); now = now.AddSeconds(20);
         Assert(!declined.ApproveAfterVisibleCountdown(true), "Declined notice later auto-approved.");
         desktop = false;
         var hidden = new SupportPermissionGate(bootstrap, () => now, () => desktop);
-        Assert(!hidden.BeginVisibleCountdown(), "A hidden/secure desktop started a countdown.");
+        Assert(!hidden.BeginLocalAccessPolicy(), "A hidden/secure desktop started a countdown.");
         desktop = true;
         var unattendedGrant = bootstrap with { Grant = bootstrap.Grant with { ApprovalRequired = false } };
         var unattended = new SupportPermissionGate(unattendedGrant, () => now, () => desktop);
-        Assert(!unattended.ApproveVisibleIndicatorPolicy(true) && !unattended.TryCapture(() => captures++), "No-prompt policy bypassed the visible indicator.");
-        Assert(unattended.BeginVisibleCountdown() && unattended.ApproveVisibleIndicatorPolicy(true), "Configured visible no-prompt policy failed.");
-        Assert(unattended.TryInput(() => inputs++), "Configured control was not enabled after visible indicator.");
+        Assert(!unattended.ApproveImmediatePolicy(true) && !unattended.TryCapture(() => captures++), "No-prompt policy bypassed local readiness.");
+        Assert(unattended.BeginLocalAccessPolicy() && unattended.ApproveImmediatePolicy(true), "Configured immediate policy failed after local readiness.");
+        Assert(unattended.TryInput(() => inputs++), "Configured control was not enabled after local readiness.");
         unattended.End();
         Assert(!unattended.TryCapture(() => captures++), "No-prompt policy bypassed emergency end.");
         var configured = bootstrap with { Grant = bootstrap.Grant with { ApprovalSeconds = 30 } };
         var configuredGate = new SupportPermissionGate(configured, () => now, () => true);
-        Assert(configuredGate.BeginVisibleCountdown(), "Configured countdown failed.");
+        Assert(configuredGate.BeginLocalAccessPolicy(), "Configured countdown failed.");
         now = now.AddSeconds(15);
         Assert(!configuredGate.ApproveAfterVisibleCountdown(true), "Configured countdown ignored its interval.");
         now = now.AddSeconds(15);
@@ -91,7 +92,12 @@ public static class SupportSelfTests
             sessionId = bootstrap.Grant.SessionId, operatorName = "test.operator", expiresAt = bootstrap.Grant.ExpiresAt,
             requestedControl = true, credential = new string('t', 43)
         }), SupportBootstrap.Json)!;
-        Assert(oldGrant.ApprovalRequired && oldGrant.ApprovalSeconds == 15, "Backward-compatible policy defaults changed.");
+        Assert(oldGrant.ApprovalRequired && oldGrant.ApprovalSeconds == 15 && oldGrant.ShowSessionDetails, "Backward-compatible policy defaults changed.");
+        var leftMonitor = new SupportDisplayGeometry("left", -1920, 0, 1920, 1080);
+        Assert(leftMonitor.MapNormalized(0, 0) == (-1920, 0) && leftMonitor.MapNormalized(1, 1) == (-1, 1079), "Left monitor mapping crossed into another screen.");
+        var upperMonitor = new SupportDisplayGeometry("above", 200, -1200, 2560, 1200);
+        Assert(upperMonitor.MapNormalized(0, 0) == (200, -1200) && upperMonitor.MapNormalized(1, 1) == (2759, -1), "Upper/scaled monitor mapping failed.");
+        Reject(() => leftMonitor.MapNormalized(1.01, 0));
         using (var inputStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("HELLO\r\n")))
         using (var reader = new StreamReader(inputStream))
             Assert(await SupportPipeFraming.ReadLineAsync(reader, 5, CancellationToken.None) == "HELLO", "Pipe framing changed a valid message.");

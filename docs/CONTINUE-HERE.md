@@ -1,28 +1,67 @@
-# Continue here — updated 2026-11-04 (Claude)
+# Continue here — endpoint improvements, persistent terminal, support settings
 
-## Latest Codex work — remote support
+Updated2026-11-04 at the user's explicit request to document immediately before usage runs out.
 
-Endpoint groups and persisted bulk results are deployed (commit04874b8). Remote support merged through PR#1 and deployed as344c6af after all Windows/Linux/container CI passed: dedicated browser window, non-elevated Windows companion, live cursor/mouse/keyboard, admin notice policy (default15second auto-approval; configurable1–300; optional form bypass), always-visible indicator and Ctrl+Alt+Shift+F12 local emergency end. Agent0.1.6 required and publicly downloadable. Native Ctrl+Alt+Delete uses a scoped service broker and existing Windows services SAS policy; no fake key chord or policy rewrite. Production schema7,36endpoints and settings UI verified; no production session started. See component handoffs/latest PROGRESS.
+## Start here
 
-**Windows sign-in/secure desktop view/control remains unimplemented.** The current helper needs an active signed-in user and pauses at Winlogon/UAC/lock. A test VM endpoint has been requested for developing/validating that additional SYSTEM desktop transport. Never describe the CAD request as sign-in control. No real staff screen, native SAS or service/companion launch has been exercised by Codex for this feature yet. Earlier historical items below may already be completed; use latest PROGRESS evidence.
+- Workspace: C:\Users\datnip\Coding\rmmwindows.
+- Current branch: **feature/endpoint-terminal**, based on main065dc07. This new feature work is UNFINISHED and NOT DEPLOYED. Changes are currently in the shared working tree; inspect git status before editing. Do not reset/overwrite contributors' files.
+- Production: https://rmm.parkcountylibrary.org, last deployed main065dc070253732f20f9213db32580bd99cbfbc35, agent download0.1.6, schema7. All remote-support preview CI passed previously; real service/desktop lifecycle and sign-in control remain unverified/unimplemented respectively.
+- User now says **no test machines available**. Continue using synthetic HTTP/WS tests and isolated ordinary Windows console-agent processes; do not install a service, capture a staff desktop or alter production groups as a test.
+- Read docs/HANDOFF-ENDPOINT-TERMINAL.md, latest docs/PROGRESS.md, docs/ARCHITECTURE.md, docs/API.md and the component HANDOFF files.
 
-The Codex handoff that used to live here has been worked through. Current state:
+## Latest user requirements — preserve these
 
-## Done since the Codex handoff
+1. Make group deletion easy to find, keeping computers/history when deleting a group.
+2. Clicking a computer should show its Active Directory OU hierarchy, distinguished/canonical names, domain controller and useful diagnostics.
+3. A real persistent remote PowerShell terminal: run a command, then another in the SAME window AND SAME PowerShell process, preserving variables/functions/current directory. Keep full live output, individual saved jobs, at-most-once execution and no replay after disconnect/reboot/rollback.
+4. Dual/multiple monitor support with a browser monitor selector and correct selected-screen mouse mapping.
+5. **Prompt and session indicator must be independent admin settings, INCLUDING BOTH OFF.** User explicitly rejected a banner, icon and any requirement that invisible mode must have a prompt. Latest override supersedes earlier project instructions requiring a permanent visible indicator or an initial prompt. Preserve defaults on/15seconds/indicatoron; do not silently change production settings. Runtime hotkey Ctrl+Alt+Shift+F12, expiry, cookie/role scope, audit and operator End remain.
+6. Windows sign-in/UAC/secure-desktop control remains separate unfinished work. Current helper is a non-elevated user process and cannot provide it; do not claim Ctrl+Alt+Delete means sign-in control works.
 
-- **Live SFC/DISM progress** (commit 8121a8a + 40ea457): wrapper no longer buffers native output; `agent/AdaptiveOutputDecoder.cs` decodes UTF-8 and UTF-16LE (sfc.exe) from raw pipe bytes; web shows CR progress as history plus the latest emitted percentage. Wide tables are full width (hidden console buffer widened to 32766; script piped to `Out-Default` so formatting flushes before `exit`).
-- **Agent self-update at service start** (40ea457, agent 0.1.1): `agent/AgentUpdater.cs`. See PROGRESS.md "Agent 0.1.1" for the safety rules.
-- **Request-to-join enrollment** and **public repo**: see PROGRESS.md. Installer default no longer needs a token.
-- **Passwords**: minimum length 8 (`MIN_PASSWORD_LENGTH`). Break-glass reset on the host: `docker exec -it library-rmm-rmm-1 node src/reset-password.mjs <username>`.
+## Current implementation
 
-## Still open
+- Agent+companion source version bumped to0.1.7, not released.
+- Extended inventory: agent/InventoryCollector.cs + InventorySelfTests.cs; server canonicalInventory/app.mjs + endpoint-inventory tests; EndpointDirectory component/model/CSS/tests. Root wired EndpointDirectory into endpoint overview. Full field contract and bounded AD behavior in HANDOFF-ENDPOINT-INVENTORY/SERVER/WEB.
+- Group deletion: EndpointGroups.tsx/CSS adds obvious selected-group Delete, inline impact/destination confirmation. Existing DELETE/groups/:id{moveToGroupId} is already deployed; new UI not deployed.
+- Persistent terminal server: server/src/terminals.mjs + schema8 in db.mjs +7HTTP tests. Root imported/mounted module in app.mjs and added shutdown to close(). Internal jobkindterminal, no public generic job creation. Exact API in HANDOFF-TERMINAL-SERVER.
+- Agent terminal: TerminalShell.cs persistent hidden PowerShell process with private PID-checked same-user pipe, random per-command stdout/stderr byte fences, state-preserving dot-source, live AdaptiveOutputDecoder, kill-on-close Windows job object. TerminalManager.cs volatile instance ownership, one-time extra command grant,5second validation with5second networkdeadline, ends shells on denial/network loss. Worker switch/DI integrated.
+- Terminal UI: new TerminalConsole.tsx/CSS written by server contributor. Root imported/wired terminalEndpoint modal state and endpoint PowerShell action now opens Terminal. Component integration/build/review still pending; see HANDOFF-TERMINAL-UI if present.
+- Support: Windows companion now advertises displays, switches selected monitor, maps input using selected native bounds, supports ShowSessionDetails=false with no banner/icon/tray and both-off no window flash. Hidden sessions end on lock/UAC/display configuration changes. Root relay support.mjs now adds policy field/snapshots/claim and monitor validation/switch pause gates. Web RemoteSupport/SupportSettings support third policy field and safe monitor-switch UI. New policy/monitor HTTP/WS tests are STILL NEEDED.
 
-1. **Disposable-VM lifecycle test of the updater**: install 0.1.1 on a throwaway VM, publish 0.1.2 (bump csproj `<Version>`, push), restart the service, confirm the log in `%ProgramData%\LibraryRmm\updates\`, the new version in the console, and that enrollment survived. Also test a deliberately broken package (bad hash) to confirm backoff and that the old service keeps running.
-2. **Initial manual upgrade of existing endpoints** (e.g. RESEARCH) from 0.1.0 → 0.1.1 by re-running the website install command, only after any running job there finishes. 0.1.0 has no updater.
-3. Real SFC/DISM run on a test endpoint to confirm progress appears live in the console (only synthetic native children were tested).
-4. Test the tokenless installer on a real Windows VM: install, approve in the console, confirm it appears and runs a job. Then confirm "Library RMM Agent" appears in Programs and Features and that Uninstall removes the service, folders and entry and shows the endpoint as revoked.
-5. Later features: Windows sign-in/secure desktop support, signed packages, MFA/SMTP. Remote ordinary-desktop support is now implemented; see current feature handoffs.
+## Status update 2026-11-05 (Claude)
 
-## Rules that still apply
+The terminal blocker is FIXED and every suite is green (see the 2026-11-05 section of PROGRESS.md for root cause, fixes and exact results). Support policy/monitor tests were added. Remaining: publish this branch via PR + CI, merge to deploy, then follow-up quality work. Real AD lookup was verified against this domain-joined PC through a local agent.
 
-At-most-once job dispatch (never requeue), never truncate output, visible screen support following the latest admin-configured notice policy, no secrets in Git, pushing `main` auto-deploys to production (keep half-finished work off `main`). The admin SSH key on this PC is NOT accepted by the server; key-based access would need to be set up by the user. Local .NET10 SDK: `artifacts/dotnet-sdk/dotnet.exe`.
+## Verification so far
+
+- New inventory pure tests pass, including actual script AST parse, DN OU escaping/root→leaf order/UTF8hex, bounded/partial discovery. No live LDAP probe requested by these tests.
+- New inventory HTTP tests3/3 pass; terminal protocol HTTP tests7/7 pass; accounts migration tests3/3 pass with schema8.
+- Most recent full server run:39/40passed; sole failure was support policy expected2fields while new GET adds showSessionDetails. That assertion has since been fixed, but whole suite NOT rerun after latest root policy/monitor edits. Earlier stale schema7 assertion was fixed to8.
+- Endpoint frontend tests7/7 and production build passed before TerminalConsole main integration / final relay work. Remote support UI final build passed independently. Full current build still needs running.
+- Both .NET projects built clean before final terminal diagnostic edits. Companion pure tests/negative monitor geometry pass. Full agent suite is NOT currently green because terminal bug above.
+- Latest real console-agent integration: agent0.1.7,97software entries; exact300000-byte PowerShell stdout/stderr, full download/no redispatch; file list pickup7ms; byte-identical5247201-byte download all PASS. Persistent terminal section FAILS as above. No actual service, remote monitor capture/input or SAS invoked.
+- No PR, push, CI, package release, browser QA or production deployment for this feature branch yet.
+
+## Next steps in order
+
+1. Finish/read all contributor handoffs. Fix and repeatedly test TerminalShell background descendant false positive and immediate failure kill; preserve no-replay and complete output.
+2. Review TerminalManager lifecycle/concurrency with process failure, close while running, output spool failure, account revocation, expiry and network failure. Run the expanded real-agent integration to completion.
+3. Finish TerminalConsole integration/build; verify same modal accepts successive commands, cwd/state persists, paginated/full output, errors preserve session, explicit uncertain-send retry uses SAME idempotency key, close ends server session and shell.
+4. Add meaningful HTTP/WS tests for showSessionDetails independent combinations/defaults/snapshot/old-agent gating; monitor advertisements/known IDs/view-only selection/input+frames blocked during switch/matching display+resume/new frame. Root support.mjs currently needs those tests and a regression pass.
+5. Run full server/web/.NET/companion/bootstrap/installer checks, local isolated browser QA with real console-agent terminal + synthetic monitor frames. Do NOT use staff desktops or production deletion for QA.
+6. Update API/architecture/progress with final behavior and limits. Build0.1.7 Windows package and Linux Docker CI on a feature PR. Enable maintainer_can_modify:true if GitHub supports it; same-repo PRs reject fork-collaboration flag.
+7. Only after green checks merge/deploy through existing main updater. Preserve all other Docker websites, ledger/output, endpoint identity and groups. Publish0.1.7; endpoints get it on next service start/re-run installer when idle. Never force fleet restarts or replay old jobs.
+
+## Commands
+
+    npm test --prefix server
+    npm test --prefix web
+    npm run build --prefix web
+    ./artifacts/dotnet-sdk/dotnet.exe run --project agent/LibraryRmm.Agent.csproj -c Release -- --self-test
+    ./artifacts/dotnet-sdk/dotnet.exe run --project companion/LibraryRmm.Support.csproj -c Release -- --self-test
+    node deploy/test-agent-integration.mjs
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/Test-InstallerPaths.ps1
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/Test-Bootstrap.ps1
+
+No credentials are included here. SSH host/root operational paths are in DEPLOYMENT.md; saved local key was previously not accepted. Never commit credentials, enrollment/agent tokens or production DB. main auto-deploys; keep unfinished work on the feature branch.

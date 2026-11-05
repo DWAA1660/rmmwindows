@@ -35,10 +35,11 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
     operatorName: row.operator_name, status: row.status, expiresAt: row.expires_at, createdAt: row.created_at,
     requestedControl: Boolean(row.requested_control), controlApproved: Boolean(row.control_approved), jobId: row.job_id,
     approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds,
+    showSessionDetails: Boolean(row.show_session_details),
     consentUser: row.consent_user || null, endedAt: row.ended_at || null, reason: row.end_reason || null });
   const runtime = id => {
     if (!connections.has(id)) connections.set(id, { paused: false, reason: null,
-      capabilities: { type: 'capabilities', secureAttention: false, secureDesktop: false }, attentionIds: new Set() });
+      capabilities: { type: 'capabilities', secureAttention: false, secureDesktop: false }, attentionIds: new Set(), displays: [] });
     return connections.get(id);
   };
   const send = (socket, data) => {
@@ -105,8 +106,8 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
 
   function mountConsole(router) {
     const policy = () => {
-      const row = db.prepare('SELECT approval_required,approval_seconds FROM support_settings WHERE id=1').get();
-      return { approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds };
+      const row = db.prepare('SELECT approval_required,approval_seconds,show_session_details FROM support_settings WHERE id=1').get();
+      return { approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds, showSessionDetails: Boolean(row.show_session_details) };
     };
     router.get('/settings/support', (req, res) => {
       if (req.operator.role !== 'admin') fail(403, 'Administrator access required.');
@@ -114,14 +115,15 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
     });
     router.patch('/settings/support', (req, res) => {
       if (req.operator.role !== 'admin') fail(403, 'Administrator access required.');
-      if (Object.keys(req.body).some(key => !['approvalRequired', 'approvalSeconds'].includes(key))) fail(400, 'Unsupported support policy field.');
+      if (Object.keys(req.body).some(key => !['approvalRequired', 'approvalSeconds', 'showSessionDetails'].includes(key))) fail(400, 'Unsupported support policy field.');
       if (typeof req.body.approvalRequired !== 'boolean') fail(400, 'approvalRequired must be true or false.');
       if (!Number.isSafeInteger(req.body.approvalSeconds) || req.body.approvalSeconds < 1 || req.body.approvalSeconds > 300)
         fail(400, 'approvalSeconds must be an integer from 1 to 300.');
-      const next = { approvalRequired: req.body.approvalRequired, approvalSeconds: req.body.approvalSeconds };
+      if (req.body.showSessionDetails !== undefined && typeof req.body.showSessionDetails !== 'boolean') fail(400, 'showSessionDetails must be true or false.');
+      const next = { approvalRequired: req.body.approvalRequired, approvalSeconds: req.body.approvalSeconds, showSessionDetails: req.body.showSessionDetails ?? policy().showSessionDetails };
       transaction(db, () => {
         const previous = policy();
-        db.prepare('UPDATE support_settings SET approval_required=?,approval_seconds=? WHERE id=1').run(next.approvalRequired ? 1 : 0, next.approvalSeconds);
+        db.prepare('UPDATE support_settings SET approval_required=?,approval_seconds=?,show_session_details=? WHERE id=1').run(next.approvalRequired ? 1 : 0, next.approvalSeconds, next.showSessionDetails ? 1 : 0);
         audit(req.operator.username, 'support.settings.updated', null, { previous, next });
       });
       res.json(next);
@@ -146,14 +148,16 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
       if (!parsedVersion || (Number(parsedVersion[1]) === 0 && Number(parsedVersion[2]) === 1 && Number(parsedVersion[3]) < 6)
         || (Number(parsedVersion[1]) === 0 && Number(parsedVersion[2]) < 1))
         fail(409, 'Update the endpoint agent to version 0.1.6 or later before starting remote support.');
+      if (!policy().showSessionDetails && Number(parsedVersion[1]) === 0 && Number(parsedVersion[2]) === 1 && Number(parsedVersion[3]) < 7)
+        fail(409, 'Update the endpoint agent to version 0.1.7 or later to use the session indicator setting.');
       for (const current of db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").all(endpointId)) valid(get(current.id));
       const id = randomUUID();
       transaction(db, () => {
         if (db.prepare("SELECT id FROM support_sessions WHERE endpoint_id=? AND status IN ('requested','awaiting_consent','active')").get(endpointId)) fail(409, 'This endpoint already has a remote support session.');
         const snapshot = policy();
-        db.prepare(`INSERT INTO support_sessions(id,endpoint_id,operator_id,operator_session_hash,operator_name,status,requested_control,created_at,expires_at,idempotency_key,request_hash,approval_required,approval_seconds)
-          VALUES (?,?,?,?,?,'requested',?,?,?,?,?,?,?)`).run(id, endpointId, req.operator.user_id, req.operator.token_hash, req.operator.username,
-          requested ? 1 : 0, iso(), new Date(Date.now() + 30 * 60000).toISOString(), key, requestHash, snapshot.approvalRequired ? 1 : 0, snapshot.approvalSeconds);
+        db.prepare(`INSERT INTO support_sessions(id,endpoint_id,operator_id,operator_session_hash,operator_name,status,requested_control,created_at,expires_at,idempotency_key,request_hash,approval_required,approval_seconds,show_session_details)
+          VALUES (?,?,?,?,?,'requested',?,?,?,?,?,?,?,?)`).run(id, endpointId, req.operator.user_id, req.operator.token_hash, req.operator.username,
+          requested ? 1 : 0, iso(), new Date(Date.now() + 30 * 60000).toISOString(), key, requestHash, snapshot.approvalRequired ? 1 : 0, snapshot.approvalSeconds, snapshot.showSessionDetails ? 1 : 0);
         const job = insertJob(endpointId, 'remote_support', { sessionId: id }, 120, req.operator.username);
         db.prepare('UPDATE support_sessions SET job_id=? WHERE id=?').run(job.id, id);
         audit(req.operator.username, 'support.created', id, { endpointId, requestedControl: requested, jobId: job.id, ...snapshot });
@@ -191,7 +195,7 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
       });
       broadcast(row.id);
       res.json({ sessionId: row.id, operatorName: row.operator_name, expiresAt: row.expires_at, requestedControl: Boolean(row.requested_control),
-        approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds, credential });
+        approvalRequired: Boolean(row.approval_required), approvalSeconds: row.approval_seconds, showSessionDetails: Boolean(row.show_session_details), credential });
     });
   }
 
@@ -252,6 +256,17 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
             rt.capabilities = { type: 'capabilities', secureAttention: message.secureAttention, secureDesktop: false };
             send(rt.browser, rt.capabilities); return;
           }
+          if (message.type === 'displays') {
+            if (!Array.isArray(message.displays) || message.displays.length < 1 || message.displays.length > 16) return end(row.id, 'failed', 'invalid_displays');
+            const ids = new Set(); const displays = [];
+            for (const item of message.displays) {
+              if (!item || typeof item.id !== 'string' || !item.id.length || item.id.length > 100 || ids.has(item.id)
+                || typeof item.name !== 'string' || item.name.length > 150 || typeof item.isPrimary !== 'boolean'
+                || ![item.width,item.height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 16000)) return end(row.id, 'failed', 'invalid_displays');
+              ids.add(item.id); displays.push({ id:item.id,name:item.name,width:item.width,height:item.height,isPrimary:item.isPrimary });
+            }
+            rt.displays = displays; send(rt.browser, {type:'displays',displays}); return;
+          }
           if (message.type === 'consent') {
             if (current.status !== 'awaiting_consent' || typeof message.approved !== 'boolean' || typeof message.control !== 'boolean' || typeof message.userName !== 'string' || message.userName.length > 200) return end(row.id, 'failed', 'invalid_consent');
             if (message.decision !== undefined && !['manual', 'automatic', 'unattended'].includes(message.decision)) return end(row.id, 'failed', 'invalid_consent');
@@ -275,14 +290,32 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
           }
           if (message.type === 'display') {
             if (![message.width, message.height].every(value => Number.isSafeInteger(value) && value > 0 && value <= 16000)) return end(row.id, 'failed', 'invalid_display');
-            rt.display = { type: 'display', width: message.width, height: message.height }; send(rt.browser, rt.display); return;
+            if (message.id !== undefined && (typeof message.id !== 'string' || !rt.displays.some(item => item.id === message.id))) return end(row.id, 'failed', 'invalid_display');
+            if (rt.switchingTo && message.id !== rt.switchingTo) return end(row.id, 'failed', 'display_switch_mismatch');
+            rt.display = { type: 'display', ...(message.id ? {id:message.id}:{}), width: message.width, height: message.height };
+            if (rt.switchingTo) rt.switchReady = true;
+            send(rt.browser, rt.display); return;
           }
           if (message.type === 'paused' && typeof message.paused === 'boolean') {
+            if (!message.paused && rt.switchingTo) {
+              if (!rt.switchReady) return end(row.id, 'failed', 'display_switch_unconfirmed');
+              rt.switchingTo = null; rt.switchReady = false;
+            }
             rt.paused = message.paused; rt.reason = rt.paused ? 'Desktop unavailable or paused by staff' : null;
             if (rt.paused) send(rt.device, { type: 'input', action: 'releaseAll' });
             broadcast(row.id); return;
           }
           return end(row.id, 'failed', 'invalid_protocol');
+        }
+        if (message.type === 'selectDisplay') {
+          if (current.status !== 'active' || rt.paused || !open(rt.device)) return;
+          if (typeof message.displayId !== 'string' || !rt.displays.some(item => item.id === message.displayId)) return end(row.id, 'failed', 'invalid_display_selection');
+          if (rt.display?.id === message.displayId) return;
+          send(rt.device, {type:'input',action:'releaseAll'});
+          rt.paused = true; rt.reason = 'Switching monitor'; rt.switchingTo = message.displayId; rt.switchReady = false;
+          broadcast(row.id);
+          audit(current.operator_name, 'support.display.selected', row.id, {displayId:message.displayId});
+          send(rt.device, {type:'selectDisplay',displayId:message.displayId}); return;
         }
         if (message.type === 'secureAttention') {
           if (typeof message.requestId !== 'string' || !uuid.test(message.requestId)) return end(row.id, 'failed', 'invalid_secure_attention');
@@ -320,7 +353,7 @@ export function mountSupport({ db, audit, fail, str, insertJob, publicOrigin, va
         send(rt.device, input);
       });
       broadcast(row.id);
-      if (side === 'browser') { send(ws, rt.capabilities); if (rt.display) send(ws, rt.display); }
+      if (side === 'browser') { send(ws, rt.capabilities); if (rt.displays.length) send(ws,{type:'displays',displays:rt.displays}); if (rt.display) send(ws, rt.display); }
     });
   }
   const timer = setInterval(() => {

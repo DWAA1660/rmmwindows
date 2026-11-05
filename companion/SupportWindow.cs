@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace LibraryRmm.Support;
 
-/// <summary>Visible local notice/countdown and sharing indicator. Never a tray-only process.</summary>
+/// <summary>Configured notice/details UI and emergency hotkey. Form visibility never owns the transport lifetime.</summary>
 internal sealed class SupportWindow : Form
 {
     private const int EmergencyHotkey = 0x524d;
@@ -14,7 +14,9 @@ internal sealed class SupportWindow : Form
     private readonly SupportConnection connection;
     private readonly SupportPermissionGate permission;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Rectangle desktop;
+    private Rectangle desktop;
+    private string selectedDisplayId;
+    private string displaysSignature;
     private readonly DesktopInput input;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 250 };
     private readonly Label heading = new() { AutoSize = false, Font = new Font("Segoe UI", 15, FontStyle.Bold) };
@@ -33,16 +35,22 @@ internal sealed class SupportWindow : Form
     private bool sawController;
     private bool lastPaused;
     private bool approved;
+    private bool switchingDisplay;
+    private bool updatingDisplays;
     private int ending;
+    private int began;
     private bool disposed;
 
     public SupportWindow(SupportBootstrap bootstrap, StreamReader servicePipe, StreamWriter serviceWriter)
     {
         this.bootstrap = bootstrap; this.servicePipe = servicePipe; this.serviceWriter = serviceWriter;
-        desktop = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("No primary monitor is available.");
+        var primary = Screen.PrimaryScreen ?? throw new InvalidOperationException("No primary monitor is available.");
+        desktop = primary.Bounds;
+        selectedDisplayId = primary.DeviceName;
+        displaysSignature = DisplaySignature();
         connection = new SupportConnection(bootstrap);
         permission = new SupportPermissionGate(bootstrap, () => DateTimeOffset.UtcNow, DesktopAvailable, () => controllerConnected && serverActive);
-        input = new DesktopInput(desktop, () => { lock (windowBoundsLock) return protectedBounds; }, () => protectedHandle, DesktopAvailable);
+        input = new DesktopInput(() => desktop, () => { lock (windowBoundsLock) return protectedBounds; }, () => protectedHandle, DesktopAvailable);
         Text = "Park County Library — IT support";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         ClientSize = new Size(650, 275);
@@ -56,8 +64,14 @@ internal sealed class SupportWindow : Form
         approve.SetBounds(350, 215, 130, 36); decline.SetBounds(495, 215, 130, 36);
         resume.SetBounds(475, 55, 150, 32);
         heading.Text = bootstrap.Grant.OperatorName + " requests remote support";
-        description.Text = "Library IT will see your primary screen" + (bootstrap.Grant.RequestedControl ? " and may move your mouse and use your keyboard" : "") +
-            $". Sharing begins automatically after the visible {bootstrap.Grant.ApprovalSeconds}-second countdown unless you choose Decline. Close this notice to decline.";
+        description.Text = "Library IT will see your screens" + (bootstrap.Grant.RequestedControl ? " and may move your mouse and use your keyboard" : "") +
+            $". Sharing begins after approval or {bootstrap.Grant.ApprovalSeconds} seconds unless you Decline. " +
+            (bootstrap.Grant.ShowSessionDetails ? "Close this notice to decline." : "THIS NOTICE THEN CLOSES; SHARING CONTINUES WITH NO ICON OR BANNER. End any time: Ctrl+Alt+Shift+F12.");
+        if (!bootstrap.Grant.ShowSessionDetails)
+        {
+            ClientSize = new Size(650, 315);
+            description.Height = 105; status.Top = 165; allowControl.Top = 200; approve.Top = 255; decline.Top = 255;
+        }
         status.Text = "Connecting to the identified operator — no sharing yet.";
         allowControl.Checked = bootstrap.Grant.RequestedControl;
         allowControl.Visible = bootstrap.Grant.RequestedControl;
@@ -83,12 +97,21 @@ internal sealed class SupportWindow : Form
         if (!bootstrap.Grant.ApprovalRequired) ConfigureIndicator();
     }
 
-    private bool DesktopAvailable() => DesktopAccess.Available(bootstrap.UserSessionId) && Screen.PrimaryScreen?.Bounds == desktop;
-    private void RememberBounds() { lock (windowBoundsLock) protectedBounds = Bounds; }
+    private bool DesktopAvailable() => DesktopAccess.Available(bootstrap.UserSessionId) &&
+        Screen.AllScreens.Any(screen => screen.DeviceName == selectedDisplayId && screen.Bounds == desktop);
+    private static string DisplaySignature() => string.Join("|", Screen.AllScreens.OrderBy(screen => screen.DeviceName, StringComparer.Ordinal).Select(screen => screen.DeviceName + ":" + screen.Bounds));
+    private void RememberBounds() { lock (windowBoundsLock) protectedBounds = Visible ? Bounds : Rectangle.Empty; }
+    private Task AdvertiseDisplaysAsync() => SafeSendAsync(new
+    {
+        type = "displays",
+        displays = Screen.AllScreens.Take(16).Select((screen, index) => new
+        { id = screen.DeviceName, name = "Display " + (index + 1) + (screen.Primary ? " (primary)" : ""), width = screen.Bounds.Width, height = screen.Bounds.Height, isPrimary = screen.Primary }).ToArray()
+    });
     private async Task BeginAsync()
     {
+        if (Interlocked.Exchange(ref began, 1) != 0) return;
         protectedHandle = Handle; RememberBounds();
-        // No Stop button by the user's latest policy: a functioning conspicuous emergency
+        // No Stop button by the user's latest policy: a functioning emergency
         // hotkey is mandatory. If registration fails, this session cannot start.
         if (!RegisterHotKey(Handle, EmergencyHotkey, 0x4007, 0x7b))
         {
@@ -104,6 +127,7 @@ internal sealed class SupportWindow : Form
             timeout.CancelAfter(TimeSpan.FromSeconds(15));
             await connection.ConnectAsync(timeout.Token);
             await SafeSendAsync(new { type = "capabilities", secureAttention = true, secureDesktop = false });
+            await AdvertiseDisplaysAsync();
             await connection.ReceiveAsync(OnRelayMessageAsync, lifetime.Token);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException) { }
@@ -129,6 +153,11 @@ internal sealed class SupportWindow : Form
                 serverActive = state.GetString() == "active";
                 return;
             case "stop": await StopAsync("operator_ended"); return;
+            case "selectDisplay":
+                if (!message.TryGetProperty("displayId", out var displayId) || displayId.ValueKind != JsonValueKind.String || displayId.GetString()!.Length > 100)
+                    throw new InvalidDataException("Invalid display selection.");
+                await SelectDisplayAsync(displayId.GetString()!);
+                return;
             case "secureAttention":
                 if (!message.TryGetProperty("requestId", out var request) || request.ValueKind != JsonValueKind.String || !Guid.TryParseExact(request.GetString(), "D", out _))
                     throw new InvalidDataException("Invalid secure-attention request.");
@@ -149,13 +178,30 @@ internal sealed class SupportWindow : Form
     {
         if (ending != 0) return;
         if (DateTimeOffset.UtcNow >= bootstrap.Grant.ExpiresAt || permission.IsEnded) { await StopAsync("session_expired"); return; }
+        if (approved && !switchingDisplay && !updatingDisplays && displaysSignature != DisplaySignature())
+        {
+            updatingDisplays = true;
+            try
+            {
+                permission.PauseLocally();
+                try { input.ReleaseAllIfSafe(); } catch (InvalidOperationException) { }
+                if (!bootstrap.Grant.ShowSessionDetails) { await StopAsync("display_configuration_changed_hidden_session"); return; }
+                await SafeSendAsync(new { type = "paused", paused = true, reason = "display_configuration_changed" });
+                await AdvertiseDisplaysAsync();
+                var selected = Screen.AllScreens.FirstOrDefault(screen => screen.DeviceName == selectedDisplayId);
+                if (selected is null) { await StopAsync("selected_display_removed"); return; }
+                desktop = selected.Bounds; displaysSignature = DisplaySignature();
+                await SafeSendAsync(new { type = "display", id = selectedDisplayId, width = desktop.Width, height = desktop.Height });
+            }
+            finally { updatingDisplays = false; }
+        }
         if (!approved)
         {
             if (!controllerConnected) return;
             if (!DesktopAvailable()) { await StopAsync("desktop_unavailable_before_approval", true); return; }
             if (!noticeStarted.HasValue)
             {
-                if (!permission.BeginVisibleCountdown()) return;
+                if (!permission.BeginLocalAccessPolicy()) return;
                 noticeStarted = DateTimeOffset.UtcNow;
                 approve.Enabled = true;
             }
@@ -164,8 +210,9 @@ internal sealed class SupportWindow : Form
             status.Text = $"Sharing starts in {seconds} seconds unless you choose Decline.";
             if (seconds == 0) await DecideAsync("automatic");
         }
-        else if (permission.IsPaused && !lastPaused)
+        else if (permission.IsPaused && !lastPaused && !switchingDisplay && !updatingDisplays)
         {
+            if (!bootstrap.Grant.ShowSessionDetails) { await StopAsync("desktop_changed_hidden_session"); return; }
             lastPaused = true;
             try { input.ReleaseAllIfSafe(); } catch (InvalidOperationException) { }
             resume.Visible = true;
@@ -180,21 +227,29 @@ internal sealed class SupportWindow : Form
         {
             "manual" => permission.ApproveLocally(allowControl.Checked),
             "automatic" => permission.ApproveAfterVisibleCountdown(allowControl.Checked),
-            "unattended" => permission.ApproveVisibleIndicatorPolicy(allowControl.Checked),
+            "unattended" => permission.ApproveImmediatePolicy(allowControl.Checked),
             _ => false
         };
         if (!accepted) return;
         approved = true;
         ConfigureIndicator();
         await SafeSendAsync(new { type = "consent", approved = true, control = permission.HasControl, userName = Environment.UserDomainName + "\\" + Environment.UserName, decision });
-        await SafeSendAsync(new { type = "display", width = desktop.Width, height = desktop.Height });
+        await SafeSendAsync(new { type = "display", id = selectedDisplayId, width = desktop.Width, height = desktop.Height });
     }
     private void ConfigureIndicator()
     {
+        if (approved && !bootstrap.Grant.ShowSessionDetails)
+        {
+            // The enrolled server snapshots both independent administrator settings. This
+            // branch hides details after their configured manual/countdown/immediate policy.
+            lock (windowBoundsLock) protectedBounds = Rectangle.Empty;
+            Hide();
+            return;
+        }
         ControlBox = false;
         ClientSize = new Size(650, 105);
         Location = new Point(desktop.Left + Math.Max(0, (desktop.Width - Width) / 2), desktop.Top + 5);
-        heading.Text = approved ? "LIBRARY IT IS SHARING YOUR PRIMARY SCREEN" : "LIBRARY IT REMOTE SUPPORT — CONNECTING";
+        heading.Text = approved ? "LIBRARY IT IS SHARING YOUR SCREEN" : "LIBRARY IT REMOTE SUPPORT — CONNECTING";
         heading.Font = new Font("Segoe UI", 12, FontStyle.Bold);
         description.SetBounds(20, 48, 440, 38);
         description.Text = bootstrap.Grant.OperatorName + (approved ? permission.HasControl ? " — mouse and keyboard enabled" : " — view only" : " — waiting for the operator");
@@ -203,6 +258,30 @@ internal sealed class SupportWindow : Form
         RefreshSharingText(); RememberBounds();
     }
     private void RefreshSharingText() => status.Text = "End locally at any time: Ctrl + Alt + Shift + F12";
+    private async Task SelectDisplayAsync(string id)
+    {
+        if (!controllerConnected || !serverActive || !permission.IsApproved || switchingDisplay || updatingDisplays) return;
+        var selected = Screen.AllScreens.FirstOrDefault(screen => screen.DeviceName == id);
+        if (selected is null) { await StopAsync("selected_display_unavailable"); return; }
+        switchingDisplay = true;
+        try
+        {
+            permission.PauseLocally();
+            try { input.ReleaseAllIfSafe(); } catch (InvalidOperationException) { }
+            await SafeSendAsync(new { type = "paused", paused = true, reason = "selecting_display" });
+            desktop = selected.Bounds; selectedDisplayId = selected.DeviceName; displaysSignature = DisplaySignature();
+            await SafeSendAsync(new { type = "display", id = selectedDisplayId, width = desktop.Width, height = desktop.Height });
+            if (!permission.ResumeLocally())
+            {
+                if (!bootstrap.Grant.ShowSessionDetails) await StopAsync("desktop_unavailable_hidden_session");
+                return;
+            }
+            lastPaused = false;
+            if (bootstrap.Grant.ShowSessionDetails) { resume.Visible = false; ConfigureIndicator(); }
+            await SafeSendAsync(new { type = "paused", paused = false, reason = "display_selected" });
+        }
+        finally { switchingDisplay = false; }
+    }
     private async Task CaptureLoopAsync()
     {
         try
@@ -281,6 +360,29 @@ internal sealed class SupportWindow : Form
     {
         if (message.Msg == 0x0312 && message.WParam.ToInt32() == EmergencyHotkey) { _ = StopAsync("local_emergency_hotkey"); return; }
         base.WndProc(ref message);
+    }
+    protected override void SetVisibleCore(bool value)
+    {
+        if (value && !bootstrap.Grant.ShowSessionDetails && !bootstrap.Grant.ApprovalRequired)
+        {
+            // Application.Run normally shows its main form. Retain only the message/hotkey
+            // handle for the explicitly configured no-notice/no-details policy; never flash it.
+            if (!IsHandleCreated) CreateHandle();
+            base.SetVisibleCore(false);
+            return;
+        }
+        base.SetVisibleCore(value);
+    }
+    protected override void OnHandleCreated(EventArgs args)
+    {
+        base.OnHandleCreated(args);
+        if (!bootstrap.Grant.ShowSessionDetails && !bootstrap.Grant.ApprovalRequired && began == 0)
+            BeginInvoke(async () => await BeginAsync());
+        else if (began != 0)
+        {
+            protectedHandle = Handle;
+            if (!RegisterHotKey(Handle, EmergencyHotkey, 0x4007, 0x7b)) { permission.End(); _ = StopAsync("emergency_hotkey_unavailable"); }
+        }
     }
     protected override void Dispose(bool disposing)
     {

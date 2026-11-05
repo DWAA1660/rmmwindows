@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace LibraryRmm.Support;
 
 public sealed record SupportGrant(string SessionId, string OperatorName, DateTimeOffset ExpiresAt, bool RequestedControl, string Credential,
-    bool ApprovalRequired = true, int ApprovalSeconds = 15)
+    bool ApprovalRequired = true, int ApprovalSeconds = 15, bool ShowSessionDetails = true)
 {
     public override string ToString() => $"Attended support session {SessionId}";
 }
@@ -27,7 +27,17 @@ public sealed record SupportBootstrap(string ServerOrigin, SupportGrant Grant, i
     public override string ToString() => $"Attended support bootstrap {Grant.SessionId}";
 }
 
-/// <summary>Local consent is the authority. Server messages can never approve or resume this gate.</summary>
+public sealed record SupportDisplayGeometry(string Id, int Left, int Top, int Width, int Height)
+{
+    public (int X, int Y) MapNormalized(double x, double y)
+    {
+        if (!double.IsFinite(x) || !double.IsFinite(y) || x is < 0 or > 1 || y is < 0 or > 1 || Width <= 0 || Height <= 0)
+            throw new InvalidDataException("Invalid monitor coordinates.");
+        return (Left + (int)Math.Round(x * (Width - 1)), Top + (int)Math.Round(y * (Height - 1)));
+    }
+}
+
+/// <summary>Enforces the snapshotted administrator access policy and local lifetime. Wire messages cannot directly approve or resume this gate.</summary>
 public sealed class SupportPermissionGate(SupportBootstrap bootstrap, Func<DateTimeOffset> clock, Func<bool> desktopAvailable, Func<bool>? controllerReady = null)
 {
     private readonly object sync = new();
@@ -35,7 +45,7 @@ public sealed class SupportPermissionGate(SupportBootstrap bootstrap, Func<DateT
     private bool control;
     private bool paused;
     private bool ended;
-    private DateTimeOffset? noticeShownAt;
+    private DateTimeOffset? localPolicyReadyAt;
     public bool IsApproved { get { lock (sync) return approved && !ended; } }
     public bool HasControl { get { lock (sync) return approved && control && !paused && !ended; } }
     public bool IsPaused { get { lock (sync) return paused; } }
@@ -51,12 +61,12 @@ public sealed class SupportPermissionGate(SupportBootstrap bootstrap, Func<DateT
             return true;
         }
     }
-    public bool BeginVisibleCountdown()
+    public bool BeginLocalAccessPolicy()
     {
         lock (sync)
         {
             if (approved || ended || !desktopAvailable() || clock() >= bootstrap.Grant.ExpiresAt) return false;
-            noticeShownAt ??= clock();
+            localPolicyReadyAt ??= clock();
             return true;
         }
     }
@@ -64,15 +74,15 @@ public sealed class SupportPermissionGate(SupportBootstrap bootstrap, Func<DateT
     {
         lock (sync)
         {
-            if (!bootstrap.Grant.ApprovalRequired || !noticeShownAt.HasValue || clock() - noticeShownAt.Value < TimeSpan.FromSeconds(bootstrap.Grant.ApprovalSeconds)) return false;
+            if (!bootstrap.Grant.ApprovalRequired || !localPolicyReadyAt.HasValue || clock() - localPolicyReadyAt.Value < TimeSpan.FromSeconds(bootstrap.Grant.ApprovalSeconds)) return false;
             return ApproveLocally(allowControl);
         }
     }
-    public bool ApproveVisibleIndicatorPolicy(bool allowControl)
+    public bool ApproveImmediatePolicy(bool allowControl)
     {
         lock (sync)
         {
-            if (bootstrap.Grant.ApprovalRequired || !noticeShownAt.HasValue) return false;
+            if (bootstrap.Grant.ApprovalRequired || !localPolicyReadyAt.HasValue) return false;
             return ApproveLocally(allowControl);
         }
     }

@@ -13,6 +13,8 @@ internal static class AgentSelfTests
     {
         var tests = new (string Name, Func<Task> Run)[]
         {
+            ("endpoint directory and diagnostics inventory parsing (no domain access)", InventorySelfTests.RunAsync),
+            ("stateful remote terminal boundaries and lifecycle (isolated local PowerShell)", TerminalSelfTests.RunAsync),
             ("support permission, countdown, origin and input gates (no desktop access)", LibraryRmm.Support.SupportSelfTests.RunAsync),
             ("secure-attention broker scope, policy and replay gates (no Windows calls)", SupportBrokerSelfTests.RunAsync),
             ("UTF-8 chunks preserve long output and surrogate pairs", ChunkIntegrityAsync),

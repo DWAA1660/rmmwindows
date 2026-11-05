@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace LibraryRmm.Support;
 
-internal sealed class DesktopInput(Rectangle screen, Func<Rectangle> indicatorBounds, Func<IntPtr> indicatorHandle, Func<bool> desktopAvailable)
+internal sealed class DesktopInput(Func<Rectangle> selectedBounds, Func<Rectangle> indicatorBounds, Func<IntPtr> indicatorHandle, Func<bool> desktopAvailable)
 {
     private readonly object sync = new();
     private readonly HashSet<string> pressedKeys = new(StringComparer.Ordinal);
@@ -30,7 +30,9 @@ internal sealed class DesktopInput(Rectangle screen, Func<Rectangle> indicatorBo
                 if (up) pressedKeys.Remove(key); else pressedKeys.Add(key);
                 return;
             }
-            var point = input.X.HasValue ? new Point(screen.Left + (int)Math.Round(input.X.Value * (screen.Width - 1)), screen.Top + (int)Math.Round(input.Y!.Value * (screen.Height - 1))) : Cursor.Position;
+            var screen = selectedBounds();
+            var mapped = input.X.HasValue ? new SupportDisplayGeometry("selected", screen.Left, screen.Top, screen.Width, screen.Height).MapNormalized(input.X.Value, input.Y!.Value) : (Cursor.Position.X, Cursor.Position.Y);
+            var point = new Point(mapped.Item1, mapped.Item2);
             if (indicatorBounds().Contains(point)) return; // Remote control cannot hide/change the visible sharing UI.
             if (input.X.HasValue) Move(point);
             switch (input.Action)

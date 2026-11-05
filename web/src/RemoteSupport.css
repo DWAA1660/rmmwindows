@@ -738,6 +738,30 @@
     padding-block: 8px;
   }
 }
+.rs-monitor-select > span {
+  font-size: 8px;
+  color: #8ba6a5;
+}
+.rs-monitor-select > select {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rs-monitor-select > select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+@media (max-width: 760px) {
+  .rs-monitor-select > span {
+    font-size: 7px;
+  }
+  .rs-monitor-select > select {
+    max-width: 135px !important;
+  }
+  .rs-toolbar-group {
+    flex-wrap: wrap;
+  }
+}
 .rs-sas-button {
   display: flex;
   align-items: center;

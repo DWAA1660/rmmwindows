@@ -14,6 +14,7 @@ type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 export type SupportPolicy = {
   approvalRequired: boolean;
   approvalSeconds: number;
+  showSessionDetails: boolean;
 };
 
 /** Admin-only policy editor; the server snapshots this policy into each new session. */
@@ -26,7 +27,8 @@ export function SupportSettings({
 }) {
   const [saved, setSaved] = useState<SupportPolicy | null>(null);
   const [approvalRequired, setApprovalRequired] = useState(true),
-    [seconds, setSeconds] = useState("15");
+    [seconds, setSeconds] = useState("15"),
+    [showSessionDetails, setShowSessionDetails] = useState(true);
   const [loading, setLoading] = useState(true),
     [saving, setSaving] = useState(false),
     [error, setError] = useState(""),
@@ -38,6 +40,7 @@ export function SupportSettings({
     if (
       !policy ||
       typeof policy.approvalRequired !== "boolean" ||
+      typeof policy.showSessionDetails !== "boolean" ||
       !Number.isInteger(policy.approvalSeconds) ||
       policy.approvalSeconds < 1 ||
       policy.approvalSeconds > 300
@@ -46,6 +49,7 @@ export function SupportSettings({
     setSaved(policy);
     setApprovalRequired(policy.approvalRequired);
     setSeconds(String(policy.approvalSeconds));
+    setShowSessionDetails(policy.showSessionDetails);
   };
   const fail = (failure: unknown) => {
     const text = failure instanceof Error ? failure.message : String(failure);
@@ -81,7 +85,8 @@ export function SupportSettings({
   const dirty =
     !!saved &&
     (approvalRequired !== saved.approvalRequired ||
-      parsedSeconds !== saved.approvalSeconds);
+      parsedSeconds !== saved.approvalSeconds ||
+      showSessionDetails !== saved.showSessionDetails);
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!saved || !validSeconds || saving) return;
@@ -92,14 +97,20 @@ export function SupportSettings({
       const policy = await request<SupportPolicy>(
         "/settings/support",
         "PATCH",
-        { approvalRequired, approvalSeconds: parsedSeconds },
+        {
+          approvalRequired,
+          approvalSeconds: parsedSeconds,
+          showSessionDetails,
+        },
       );
       if (mounted.current) {
         acceptPolicy(policy);
         setMessage(
           policy.approvalRequired
-            ? `Saved. New sessions show a staff notice and start after ${policy.approvalSeconds} second${policy.approvalSeconds === 1 ? "" : "s"} unless declined.`
-            : "Saved. New sessions connect immediately with a visible staff indicator.",
+            ? `Saved. New sessions show a staff notice and start after ${policy.approvalSeconds} second${policy.approvalSeconds === 1 ? "" : "s"} unless declined.${policy.showSessionDetails ? " The sharing indicator stays visible." : " After the initial notice, no banner or icon is shown; the emergency shortcut remains available."}`
+            : policy.showSessionDetails
+              ? "Saved. New sessions connect immediately with a visible staff indicator."
+              : "Saved. Sessions start without a notice, banner, or icon. Ctrl+Alt+Shift+F12 still ends sharing locally.",
         );
       }
     } catch (failure) {
@@ -187,6 +198,27 @@ export function SupportSettings({
               Choose 1–300 seconds. The default is 15 seconds.
             </small>
           </div>
+          <label className="support-policy-toggle">
+            <input
+              type="checkbox"
+              checked={showSessionDetails}
+              disabled={!saved || saving}
+              onChange={(event) => {
+                setShowSessionDetails(event.target.checked);
+                setMessage("");
+              }}
+            />
+            <span>
+              <strong>Show sharing indicator</strong>
+              <small>
+                {showSessionDetails
+                  ? "Keep the session banner visible on the staff desktop while sharing."
+                  : approvalRequired
+                    ? "After the initial notice, no banner or icon is shown. Ctrl+Alt+Shift+F12 still ends sharing."
+                    : "Sessions start without a notice, banner, or icon. Ctrl+Alt+Shift+F12 still ends sharing locally."}
+              </small>
+            </span>
+          </label>
           {!approvalRequired && (
             <div className="support-policy-immediate">
               <Monitor size={17} />
@@ -195,9 +227,11 @@ export function SupportSettings({
                   Saving applies immediate access to new sessions.
                 </strong>{" "}
                 No approval form or countdown appears, including on unattended
-                VMs. The staff desktop still shows a persistent sharing
-                indicator and keeps <kbd>Ctrl+Alt+Shift+F12</kbd> available to
-                end the session locally.
+                VMs.{" "}
+                {showSessionDetails
+                  ? "The staff desktop shows a persistent sharing indicator."
+                  : "No notice, banner, or icon is shown."}{" "}
+                <kbd>Ctrl+Alt+Shift+F12</kbd> still ends sharing locally.
               </p>
             </div>
           )}
