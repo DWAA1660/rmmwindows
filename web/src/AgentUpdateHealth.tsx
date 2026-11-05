@@ -279,7 +279,7 @@ export function AgentUpdateHealth({
               <p className="auh-reason">{model.reason}</p>
               <div className="auh-report-meta">
                 <span>Last check: {dateText(row.updateStatus?.checkedAt)}</span>
-                {row.updateStatus?.nextRetryAt && (
+                {row.updateStatus?.phase !== "current" && row.updateStatus?.nextRetryAt && (
                   <span>
                     Next retry: {dateText(row.updateStatus.nextRetryAt)}
                   </span>
@@ -398,7 +398,7 @@ export function AgentUpdateDetails({
         </div>
         <div>
           <dt>Next retry</dt>
-          <dd>{dateText(status?.nextRetryAt)}</dd>
+          <dd>{status?.phase === "current" ? "Not needed" : dateText(status?.nextRetryAt)}</dd>
         </div>
         <div>
           <dt>Stage</dt>
