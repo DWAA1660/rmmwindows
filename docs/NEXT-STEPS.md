@@ -1,6 +1,8 @@
 # Next work and Claude handoff
 
-Read `AGENTS.md`, `PROGRESS.md`, `ARCHITECTURE.md`, `API.md`, then the component `HANDOFF-*.md` files. Source is private GitHub `DWAA1660/rmmwindows`. `main` is deployed automatically; keep incomplete work on a feature branch. PRs opened for DWAA1660 must keep maintainer edits enabled.
+Read `AGENTS.md`, `PROGRESS.md`, `ARCHITECTURE.md`, `API.md`, then the component `HANDOFF-*.md` files. Source is public GitHub `DWAA1660/rmmwindows`. `main` is deployed automatically; keep incomplete work on a feature branch. PRs opened for DWAA1660 must keep maintainer edits enabled where GitHub supports it (cross-repository PRs).
+
+Current priority: validate the deployed agent0.1.6 remote companion on an identified disposable VM. Ordinary signed-in desktop view/control, admin notification settings and native policy-honoring Ctrl+Alt+Delete request are implemented; Windows sign-in/secure-desktop control is not. The user has been asked for a test VM endpoint; await that target before live desktop tests. See `HANDOFF-REMOTE-AGENT.md` for exact lifecycle checks and native API boundaries. Never claim synthetic relay tests exercised a real Windows desktop.
 
 ## Highest-priority validation
 
@@ -18,7 +20,7 @@ No endpoint service has been installed by Codex. Current local Windows test proc
 - Add metric samples/time-series charts, configurable polling intervals, disk/agent health alerts and retention controls. Current metrics are 15-minute inventory snapshots by default.
 - Add signed installer/MSI/EXE packaging, signed release manifests and documented agent upgrade policy. The current release is a self-contained executable plus administrator PowerShell scripts in a zip.
 - Add Action1 release deployment later, as requested. Do not embed a long-lived multiuse enrollment token in a public release asset.
-- Design remote assistance as an explicit consented session with a per-user desktop companion, persistent visible indicator, operator audit and a user stop control. No covert capture; input control is out of scope for this preview.
+- Extend remote assistance to Windows sign-in/secure desktops only with a separate scoped SYSTEM desktop design and disposable-VM lifecycle validation. Current ordinary-user companion intentionally pauses there. Preserve the latest admin-configured form/countdown policy, visible indicator and emergency shortcut; no covert capture.
 - Expand software inventory to unloaded user profiles and Store/MSIX as needed; current uninstall registry inventory is explicitly limited.
 
 ## Production operations
