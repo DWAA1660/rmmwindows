@@ -242,3 +242,11 @@ Each contributor owns separate paths; record shipped features, test commands/res
 - UI follow-up: a current report can retain historical attempt backoff metadata; show Next retry as Not needed and suppress the dashboard retry line for current reports. TypeScript/Vite build passed. This does not change agent binaries or execution semantics.
 - Live service-context terminal PASS: jobs f55ba002-f374-4173-be7a-bb12a897f538 and9a173c0f-2b28-4c6b-987d-a427d772cedc both succeeded, same PowerShell PID14180, preserved testvariable/currentdirectory, Running service, executable productversion0.1.8 and unchanged15:03:12.500UTC boot. Explicitly ended terminal after verification. Ignored screenshot artifacts/research-terminal-production.png. No endpoint configuration/file changes.
 - Exact original Pipeline-stopped interruption remains unproven. New checkpoints/safe error catalog/helper outcomes distinguish future failures without transmitting raw installer logs or credentials. Periodic idle checks have local coverage; a second live upgrade to a newer release remains unobserved. No staff remote support/capture/input/SAS was exercised.
+
+## 2026-11-05 — Update Endpoint script outage and fix
+
+- Running `/install.ps1` as an RMM job stopped the agent service on 34 computers: the agent kills the job's process tree when it stops, and the installer died before it could restart the service. Full timeline is in CONTINUE-HERE.md.
+- Bootstrap now hands off to a one-time SYSTEM scheduled task whenever its parent chain includes `LibraryRmm.Agent.exe` (RMM job or terminal). The job finishes successfully at once; the detached task updates and always tries to restart the service. Library scripts that run `/install.ps1` work once this is deployed.
+- `installer/Repair-Agent.ps1` recovers stopped agents. Run it from Action1 or an admin prompt, never from the RMM (the agent is down).
+- Tests: `Test-Bootstrap.ps1` gains a real process-tree detection test and an elevated (CI-only) mocked handoff test that checks the SYSTEM principal, the protected copy, self-removal and the restart safeguard, and that nothing is installed inside the job.
+- Limitations: not yet verified on a live endpoint. Agents are still unreachable until each is repaired or rebooted.

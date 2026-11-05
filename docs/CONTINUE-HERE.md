@@ -1,6 +1,14 @@
-# Continue here — updated 2026-11-05 (agent update investigation)
+# Continue here — updated 2026-11-05 (fleet outage from the "Update Endpoint" script)
 
-## Latest checkpoint — read before the older handoff below
+## Incident 2026-11-05 15:36 UTC — read first
+
+- The user ran the script-library entry **Update Endpoint** (downloads `/install.ps1` and runs it) as an RMM job on the fleet. **34 computers went offline between 15:35:59 and 15:36:49 UTC**, ITASSISTANT included.
+- Cause: the job runs as a child of the agent. The installer stops the agent service; the stopping agent kills the job's whole process tree (`PowerShellRunner.TryKill`, `entireProcessTree`), so the installer died before its `Start-Service`. SCM recovery doesn't fire because the stop was clean. Evidence on ITASSISTANT: Windows PowerShell log shows the job `invoke.ps1` and `C:\WINDOWS\TEMP\Install-LibraryRmm.ps1` starting at 08:36:16 local with no engine-stopped event; the service logged "stopped successfully" at 08:36:42. Remote SCM from this PC is blocked by the firewall ("RPC server is unavailable").
+- Fix (branch `fix/update-handoff`): `Bootstrap-Agent.ps1` detects an ancestor `LibraryRmm.Agent.exe`. In that case it copies itself into a new SYSTEM/Admin-only `C:\Windows\Temp\LibraryRmm-Update-<guid>`, registers a trigger-less one-time SYSTEM scheduled task, starts it and exits 0. The task waits 20s (so the job can report completion), installs, always tries `Start-Service` if the service isn't running, removes its task and keeps a transcript in that folder. The agent's own updater is unaffected (it doesn't use the bootstrap). Once deployed, the existing library script works unchanged, because it downloads the bootstrap fresh.
+- Recovery for computers already offline: `installer/Repair-Agent.ps1`, run **outside** the RMM (Action1 or an elevated prompt). It starts a stopped service (the agent then self-updates at startup) or, if the service can't start, reinstalls while keeping the enrollment. Rebooting also works (the service is Automatic).
+- Verified: real process-tree detection test passes locally; the mocked elevated handoff test runs in CI only (local shell not elevated); installer path tests and 47 server tests pass. Not verified on a real endpoint yet.
+
+## Previous checkpoint
 
 - PR #5 merged as `dc44403388e3187323dbd86c2f9cac808bc5d5a2` after complete Windows agent, server/web and Linux container CI passed (run `42051042776`). Production deployment succeeded at 15:08 UTC: healthy website, public agent **0.1.8** (78,887,530 bytes), schema **9**. Other ten Docker containers retained their existing uptime.
 - RESEARCH / Cody Public was actually running **0.1.6**. Its verified 0.1.7 package was staged, but installer transcript stopped with "The pipeline has been stopped" before enrollment preservation. The following Windows reboot occurred inside the update attempt's 30-minute backoff. The old agent checks only at service startup, leaving it old after that reboot. Exact original installer interruption cause remains unproven; staged installer directory validation passed independently.
