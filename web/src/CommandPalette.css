@@ -1,0 +1,20 @@
+.palette-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgba(15, 32, 30, .45); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 16px; backdrop-filter: blur(2px); }
+.palette { width: min(620px, 100%); background: #fff; border-radius: 14px; box-shadow: 0 24px 60px rgba(10, 30, 28, .35); overflow: hidden; display: flex; flex-direction: column; }
+.palette-search { display: flex !important; flex-direction: row !important; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #e6ecea; margin: 0; color: #6b7a78; }
+.palette-search input { flex: 1; min-width: 0; border: 0; outline: 0; font: inherit; font-size: 16px; color: #1d2f2c; background: transparent; padding: 0; margin: 0; box-shadow: none; }
+.palette kbd { font: 10px/1 ui-monospace, Consolas, monospace; border: 1px solid #dfe5e3; border-bottom-width: 2px; border-radius: 4px; padding: 3px 5px; color: #5d6d6a; background: #f8fbfa; margin: 0 1px; }
+.palette-results { list-style: none; margin: 0; padding: 6px; max-height: 50vh; overflow: auto; }
+.palette-results li { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+.palette-results li.active { background: #edf6f1; }
+.palette-icon { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; border-radius: 7px; background: #f0f4f3; color: #31665a; flex-shrink: 0; }
+.palette-icon.action { background: #fdf1e4; color: #9a5a17; }
+.palette-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.palette-text strong { font-size: 13px; color: #1d2f2c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-text small { font-size: 11px; color: #6b7a78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #8a9896; }
+.palette-enter { color: #168376; }
+.palette-empty { color: #6b7a78; font-size: 13px; cursor: default !important; }
+.palette-footer { display: flex; gap: 16px; padding: 9px 16px; border-top: 1px solid #e6ecea; font-size: 11px; color: #6b7a78; background: #fafcfb; }
+.palette-hint { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dfe5e3; background: #fff; border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12px; color: #5d6d6a; cursor: pointer; }
+.palette-hint:hover { border-color: #168376; color: #168376; }
+@media (max-width: 720px) { .palette-backdrop { padding-top: 8vh; } .palette-footer { display: none; } .palette-hint kbd { display: none; } }
