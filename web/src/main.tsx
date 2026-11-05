@@ -10,7 +10,6 @@ import {
   CalendarClock,
   Check,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Code2,
   Copy,
@@ -65,6 +64,9 @@ import { AgentUpdateHealth, AgentUpdateDetails } from './AgentUpdateHealth';
 import type { AgentUpdateStatus } from './agentUpdateHealthModel';
 import { scriptTemplates } from './scriptTemplates';
 import type { PaletteItem } from './commandPaletteModel';
+import { BulkActions } from './BulkActions';
+import { BulkAgentUpdate } from './BulkAgentUpdate';
+import "./console-layout.css";
 
 type Disk = {
   name: string;
@@ -538,6 +540,7 @@ function App() {
       timeoutMinutes?: number;
     } | null>(null),
     [starterOpen, setStarterOpen] = useState(false),
+    [bulkUpdate, setBulkUpdate] = useState<string[] | null>(null),
     [activitySearch, setActivitySearch] = useState(""),
     [activityKind, setActivityKind] = useState("all"),
     [showBrowsing, setShowBrowsing] = useState(false),
@@ -714,23 +717,48 @@ function App() {
     }
     setCommand({ kind, ids, script: body, path: "C:\\" });
   };
-  const nav: {
-    key: View;
+  const pendingJoins = joinRequests.filter((row) => row.status === "pending").length;
+  // Navigation grouped by what staff are doing: looking at the fleet, automating work, administering.
+  const navSections: {
     label: string;
-    icon: typeof Monitor;
-    count?: number;
+    items: { key: View; label: string; icon: typeof Monitor; count?: number; badge?: string }[];
   }[] = [
-    { key: "overview", label: "Overview", icon: LayoutDashboard },
     {
-      key: "endpoints",
-      label: "Endpoints",
-      icon: Monitor,
-      count: active.length,
+      label: "Fleet",
+      items: [
+        { key: "overview", label: "Overview", icon: LayoutDashboard },
+        { key: "endpoints", label: "Endpoints", icon: Monitor, count: active.length },
+        { key: "software", label: "Software", icon: Package },
+      ],
     },
-    { key: "software", label: "Software", icon: Package },
-    { key: "scripts", label: "Script library", icon: Code2 },
-    { key: "schedules", label: "Schedules", icon: CalendarClock },
-    { key: "activity", label: "Activity", icon: Activity },
+    {
+      label: "Automation",
+      items: [
+        { key: "scripts", label: "Script library", icon: Code2 },
+        { key: "schedules", label: "Schedules", icon: CalendarClock },
+        {
+          key: "activity",
+          label: "Activity",
+          icon: Activity,
+          count: jobs.filter(isActiveJob).length || undefined,
+          badge: "Jobs in progress",
+        },
+      ],
+    },
+    {
+      label: "Administration",
+      items: [
+        {
+          key: "enrollment",
+          label: "Add endpoints",
+          icon: Plus,
+          count: pendingJoins || undefined,
+          badge: "Computers waiting for approval",
+        },
+        { key: "audit", label: "Audit log", icon: ShieldCheck },
+        { key: "settings", label: "Settings", icon: Settings2 },
+      ],
+    },
   ];
   const pageInfo: Record<View, { title: string; subtitle: string }> = {
     overview: {
@@ -802,6 +830,11 @@ function App() {
         ]
       : []),
   ];
+  const openEndpoints = (statusFilter: string) => {
+    changeView("endpoints");
+    setGroupFilter("all");
+    setFilter(statusFilter);
+  };
   const choosePaletteItem = (item: PaletteItem) => {
     if (item.id.startsWith("page:")) changeView(item.id.slice(5) as View);
     else if (item.id.startsWith("computer:")) {
@@ -946,36 +979,51 @@ function App() {
       </table>
     </div>
   );
-  const renderSelection = () =>
-    selected.length > 0 && (
-      <div className="selection-toolbar">
-        <span>
-          <CheckCircle2 size={16} />
-          <strong>{selected.length}</strong> selected
-        </span>
-        <div>
-          <button onClick={() => openCommand("powershell")}>
-            <Terminal size={15} />
-            PowerShell
-          </button>
-          <button onClick={() => void queueJobs(selected, "inventory", {})}>
-            <RefreshCw size={14} />
-            Inventory
-          </button>
-          <button onClick={() => openCommand("reboot")}>
-            <Power size={14} />
-            Reboot
-          </button>
-          <button
-            className="icon-button"
-            aria-label="Clear selection"
-            onClick={() => setSelected([])}
-          >
-            <X size={16} />
-          </button>
-        </div>
-      </div>
-    );
+  // Computers in the current group view (ignores status filter and search), for "Select entire group".
+  const groupScope = active.filter(
+    (ep) => groupFilter === "all" || ep.groupId === groupFilter,
+  );
+  const renderSelection = (withGroups = false) => (
+    <BulkActions
+      selected={selected}
+      canAct={user?.role !== "viewer"}
+      busy={busy}
+      groups={withGroups ? groups : undefined}
+      scope={
+        withGroups
+          ? {
+              label:
+                groupFilter === "all"
+                  ? "all endpoints"
+                  : `entire group`,
+              ids: groupScope.map((ep) => ep.id),
+            }
+          : undefined
+      }
+      onSelect={setSelected}
+      onRun={(kind) =>
+        kind === "inventory"
+          ? void queueJobs(selected, "inventory", {})
+          : openCommand(kind)
+      }
+      onUpdateAgent={() => setBulkUpdate(selected)}
+      onMove={async (groupId) => {
+        setBusy(true);
+        setError("");
+        try {
+          await api(`/groups/${groupId}/members`, "POST", { endpointIds: selected });
+          const name = groups.find((group) => group.id === groupId)?.name || "the group";
+          notify(`${selected.length} computer${selected.length === 1 ? "" : "s"} moved to ${name}.`);
+          setSelected([]);
+          await refresh();
+        } catch (err) {
+          fail(err);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
+  );
 
   if (authLoading)
     return (
@@ -997,56 +1045,36 @@ function App() {
             <strong>Park County Library</strong>
             <small>IT workspace</small>
           </div>
-          <ChevronDown size={14} />
         </div>
-        <span className="nav-section">WORKSPACE</span>
-        <nav>
-          {nav.map((item) => (
-            <button
-              key={item.key}
-              className={view === item.key ? "nav-item active" : "nav-item"}
-              onClick={() => changeView(item.key)}
-            >
-              <item.icon size={18} />
-              <span>{item.label}</span>
-              {item.count !== undefined && (
-                <span className="nav-count">{item.count}</span>
-              )}
-            </button>
+        <nav className="nav-sections" aria-label="Console sections">
+          {navSections.map((section) => (
+            <div className="nav-group" key={section.label}>
+              <span className="nav-section">{section.label.toUpperCase()}</span>
+              {section.items.map((item) => (
+                <button
+                  key={item.key}
+                  className={view === item.key ? "nav-item active" : "nav-item"}
+                  aria-current={view === item.key ? "page" : undefined}
+                  onClick={() => changeView(item.key)}
+                >
+                  <item.icon size={18} />
+                  <span>{item.label}</span>
+                  {item.count !== undefined && (
+                    <span className={`nav-count ${item.badge ? "attention" : ""}`} title={item.badge}>
+                      {item.count}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-health">
+          <div className="sidebar-health" title="Jobs are consumed on the server before they run and are never replayed automatically.">
             <span className="live-dot" />
-            <span>Server-authoritative execution</span>
+            <span>At-most-once execution</span>
             <ShieldCheck size={14} />
           </div>
-          <button
-            className={`nav-item ${view === "enrollment" ? "active" : ""}`}
-            onClick={() => changeView("enrollment")}
-          >
-            <Plus size={18} />
-            <span>Add endpoints</span>
-            {joinRequests.some((row) => row.status === "pending") && (
-              <span className="nav-count" title="Computers waiting for approval">
-                {joinRequests.filter((row) => row.status === "pending").length}
-              </span>
-            )}
-          </button>
-          <button
-            className={`nav-item ${view === "audit" ? "active" : ""}`}
-            onClick={() => changeView("audit")}
-          >
-            <ShieldCheck size={18} />
-            <span>Audit log</span>
-          </button>
-          <button
-            className={`nav-item ${view === "settings" ? "active" : ""}`}
-            onClick={() => changeView("settings")}
-          >
-            <Settings2 size={18} />
-            <span>Settings</span>
-          </button>
           <div className="profile">
             <span className="profile-avatar">
               {user.username.slice(0, 2).toUpperCase()}
@@ -1093,44 +1121,33 @@ function App() {
             </span>
           </div>
           <div className="topbar-right">
-            <span className="workspace-location">
-              <span /> Park County Library
-            </span>
-            <span className="topbar-divider" />
             <button
               className="palette-hint"
               title="Quick search (Ctrl+K)"
               onClick={() => window.dispatchEvent(new Event("open-command-palette"))}
             >
-              <Search size={14} /> Search <kbd>Ctrl</kbd>
+              <Search size={15} /> Search computers, pages and actions
+              <kbd>Ctrl</kbd>
               <kbd>K</kbd>
             </button>
             <button
-              className="icon-button"
-              title="Refresh workspace"
+              className="button small secondary topbar-refresh"
+              title={
+                lastRefresh
+                  ? `Updated ${ago(lastRefresh).toLowerCase()} · refreshes every 10 seconds`
+                  : "Refresh workspace"
+              }
               aria-label="Refresh workspace"
               onClick={() => void refresh(true)}
             >
-              <RefreshCw size={17} className={loading ? "spin" : ""} />
+              <RefreshCw size={15} className={loading ? "spin" : ""} />
+              <span>Refresh</span>
             </button>
-            <span className="topbar-avatar">
-              {user.username.slice(0, 1).toUpperCase()}
-            </span>
           </div>
         </header>
         <main>
           <div className="page-heading">
             <div>
-              <div className="eyebrow dark">
-                LIBRARY OPERATIONS <span>/</span>{" "}
-                {new Date()
-                  .toLocaleDateString(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })
-                  .toUpperCase()}
-              </div>
               <h1>{pageInfo[view].title}</h1>
               <p>{pageInfo[view].subtitle}</p>
             </div>
@@ -1176,13 +1193,6 @@ function App() {
                 </button>
               ) : ["overview", "endpoints"].includes(view) ? (
                 <>
-                  <button
-                    className="button secondary"
-                    onClick={() => void refresh(true)}
-                  >
-                    <RefreshCw size={15} className={loading ? "spin" : ""} />
-                    Refresh
-                  </button>
                   {user.role !== "viewer" && (
                     <button
                       className="button secondary"
@@ -1227,55 +1237,14 @@ function App() {
           )}
           {view === "overview" && (
             <>
-              <div className="overview-banner">
-                <div>
-                  <span className="banner-kicker">
-                    <span className="live-dot" /> YOUR WORKSPACE AT A GLANCE
-                  </span>
-                  <h2>
-                    {active.length
-                      ? "Everything you need. Nothing out of view."
-                      : "Good things start with a connected fleet."}
-                  </h2>
-                  <p>
-                    {active.length
-                      ? `${online.length} of ${active.length} endpoints are online. ${lowDisk.length ? `${lowDisk.length} need a little more disk space.` : "Keep the day moving, from one clear workspace."}`
-                      : "Add your first Windows endpoint to see its health, storage, and software here."}
-                  </p>
-                  <button
-                    onClick={() =>
-                      active.length
-                        ? changeView("endpoints")
-                        : changeView("enrollment")
-                    }
-                  >
-                    {active.length
-                      ? "Explore your endpoints"
-                      : "Connect your first endpoint"}
-                    <ArrowRight size={15} />
-                  </button>
-                </div>
-                <div className="banner-graphic" aria-hidden="true">
-                  <div className="graphic-ring ring-outer" />
-                  <div className="graphic-ring ring-inner" />
-                  <span className="graphic-main">
-                    <Monitor size={35} strokeWidth={1.4} />
-                  </span>
-                  <span className="graphic-badge">
-                    <Check size={15} />
-                  </span>
-                  <span className="graphic-small">
-                    <ShieldCheck size={18} />
-                  </span>
-                  <span className="graphic-line" />
-                </div>
-              </div>
               <div className="stats-grid">
                 <Stat
                   label="Total endpoints"
                   value={active.length}
                   icon={Monitor}
                   footer="Your connected Windows fleet"
+                  action="Open endpoints"
+                  onClick={() => openEndpoints("all")}
                 />
                 <Stat
                   label="Online now"
@@ -1290,6 +1259,8 @@ function App() {
                   percent={
                     active.length ? (online.length / active.length) * 100 : 0
                   }
+                  action="Show online computers"
+                  onClick={() => openEndpoints("online")}
                 />
                 <Stat
                   label="Need attention"
@@ -1297,6 +1268,12 @@ function App() {
                   icon={Activity}
                   accent="amber"
                   footer={`${lowDisk.length} low storage · ${offline} offline`}
+                  action="Show fleet health"
+                  onClick={() =>
+                    document
+                      .getElementById("fleet-health")
+                      ?.scrollIntoView({ behavior: "smooth", block: "start" })
+                  }
                 />
                 <Stat
                   label="Active jobs"
@@ -1304,9 +1281,14 @@ function App() {
                   icon={Terminal}
                   accent="purple"
                   footer={`${jobs.filter((j) => j.status === "succeeded").length} completed successfully`}
+                  action="Show jobs in progress"
+                  onClick={() => {
+                    changeView("activity");
+                    setFilter("active");
+                  }}
                 />
               </div>
-              <AgentUpdateHealth endpoints={active} request={api} onOpenEndpoint={id=>{const ep=endpoints.find(item=>item.id===id);if(ep)setDetail(ep);}}/>
+              <div id="fleet-health">
               <FleetHealth
                 endpoints={active}
                 request={api}
@@ -1327,6 +1309,8 @@ function App() {
                   })
                 }
               />
+              </div>
+              <AgentUpdateHealth endpoints={active} request={api} onOpenEndpoint={id=>{const ep=endpoints.find(item=>item.id===id);if(ep)setDetail(ep);}}/>
               <div className="dashboard-grid">
                 <section className="panel fleet-panel">
                   <div className="panel-heading">
@@ -1512,67 +1496,46 @@ function App() {
                     </div>
                   )}
                 </section>
-                <section className="safety-card">
-                  <span className="safety-icon">
-                    <ShieldCheck size={23} />
-                  </span>
-                  <span className="section-label">BUILT FOR PEACE OF MIND</span>
-                  <h2>
-                    One action.
-                    <br />
-                    One execution.
-                  </h2>
-                  <p>
-                    Jobs are consumed on the server before execution. Endpoint
-                    rollbacks cannot automatically replay a reboot or script.
-                  </p>
-                  <button
-                    className="text-button"
-                    onClick={() => changeView("activity")}
-                  >
-                    See job history
-                    <ArrowRight size={14} />
-                  </button>
-                </section>
               </div>
             </>
           )}
           {view === "endpoints" && (
             <>
-              <EndpointGroups groups={groups} current={groupFilter} onChange={id=>{setGroupFilter(id);setSelected([]);}} members={active} selected={selected} onSelect={setSelected} request={api} refresh={refresh} onError={fail} readOnly={user.role==='viewer'} onAdd={()=>changeView('enrollment')} onRun={(kind,ids)=>{setSelected(ids);if(kind==='inventory')void queueJobs(ids,kind,{});else openCommand(kind,ids);}}/>
-              <div className="inline-stats">
-                <span>
-                  <i className="status-dot green" />
-                  <strong>{online.length}</strong> online
-                </span>
-                <span>
-                  <i className="status-dot gray" />
-                  <strong>{offline}</strong> offline
-                </span>
-                <span>
-                  <i className="status-dot amber" />
-                  <strong>{lowDisk.length}</strong> low storage
-                </span>
-              </div>
-              <section className="panel">
+              <section className="panel endpoints-workspace">
+                <EndpointGroups
+                  groups={groups}
+                  current={groupFilter}
+                  onChange={(id) => {
+                    setGroupFilter(id);
+                    setSelected([]);
+                  }}
+                  members={active}
+                  onSelect={setSelected}
+                  request={api}
+                  refresh={refresh}
+                  onError={fail}
+                  readOnly={user.role === "viewer"}
+                  onAdd={() => changeView("enrollment")}
+                />
                 <div className="table-toolbar">
-                  <div className="tabs">
-                    {[
-                      ["all", "All endpoints"],
-                      ["online", "Online"],
-                      ["offline", "Offline"],
-                      ["attention", "Low storage"],
+                  <div className="tabs status-tabs" role="group" aria-label="Filter by status">
+                    {(
                       [
-                        "reboot",
-                        `Needs reboot (${active.filter((ep) => ep.inventory?.pendingReboot === true).length})`,
-                      ],
-                    ].map(([key, label]) => (
+                        ["all", "All", groupScope.length],
+                        ["online", "Online", groupScope.filter((ep) => ep.online).length],
+                        ["offline", "Offline", groupScope.filter((ep) => !ep.online).length],
+                        ["attention", "Low storage", groupScope.filter((ep) => ep.inventory?.disks?.some((d) => usedPercent(d) >= 85)).length],
+                        ["reboot", "Needs reboot", groupScope.filter((ep) => ep.inventory?.pendingReboot === true).length],
+                      ] as [string, string, number][]
+                    ).map(([key, label, count]) => (
                       <button
                         key={key}
+                        aria-pressed={filter === key}
                         onClick={() => setFilter(key)}
                         className={filter === key ? "active" : ""}
                       >
                         {label}
+                        <span className="tab-count">{count}</span>
                       </button>
                     ))}
                   </div>
@@ -1594,7 +1557,7 @@ function App() {
                     )}
                   </div>
                 </div>
-                {renderSelection()}
+                {renderSelection(true)}
                 {filtered.length ? (
                   renderEndpointTable()
                 ) : (
@@ -1863,9 +1826,13 @@ function App() {
             </>
           )}
           {view === "activity" && (
+            <>
             <section className="panel">
               <div className="panel-heading"><div><h2>Recent runs</h2><p>Reopen a run to compare every computer’s result and complete output.</p></div></div>
               <div className="recent-runs">{runs.slice(0,20).map(run=><button key={run.id} className="run-link" onClick={()=>void api<{jobs:Job[]}>(`/runs/${run.id}`).then(result=>{if(result.jobs.length===1)setJobDetail(result.jobs[0]);else setBatch(result.jobs);}).catch(fail)}><strong>{run.name}</strong><span>{run.endpointCount} computers · {when(run.createdAt)}</span><small>{Object.entries(run.counts).map(([status,count])=>`${count} ${status}`).join(' · ')}</small><span>View results →</span></button>)}{!runs.length&&<p className="muted">New actions will appear here as runs.</p>}</div>
+            </section>
+            <section className="panel">
+              <div className="panel-heading"><div><h2>All jobs</h2><p>Every command sent to a computer, with its complete output.</p></div></div>
               <div className="table-toolbar">
                 <div className="tabs">
                   {[
@@ -1989,6 +1956,7 @@ function App() {
                 <span>Complete output available for every job</span>
               </div>
             </section>
+            </>
           )}
           {view === "enrollment" && (
             <>
@@ -2377,8 +2345,11 @@ function App() {
             <span className="mono">{detail.id.slice(0, 8)}</span>
           </div>
           <div className="detail-actions">
+            <div className="action-group" role="group" aria-label="Connect">
+            <span className="action-group-label">Connect</span>
+            <div>
             {user.role !== 'viewer' && <button
-              className="button primary small"
+              className="button primary"
               disabled={detail.revoked || !detail.online}
               onClick={() => {
                 const version = detail.inventory?.agentVersion?.split('.').map(Number);
@@ -2393,7 +2364,7 @@ function App() {
               <Monitor size={15} /> Remote support
             </button>}
             <button
-              className="button primary small"
+              className="button primary"
               disabled={detail.revoked}
               onClick={() => {
                 setTerminalEndpoint(detail);
@@ -2404,7 +2375,23 @@ function App() {
               Terminal
             </button>
             <button
-              className="button secondary small"
+              className="button secondary"
+              disabled={detail.revoked}
+              onClick={() => {
+                setExplorer(detail);
+                setDetail(null);
+              }}
+            >
+              <FolderSearch size={15} />
+              Browse files
+            </button>
+            </div>
+            </div>
+            <div className="action-group" role="group" aria-label="Maintain">
+            <span className="action-group-label">Maintain</span>
+            <div>
+            <button
+              className="button secondary"
               disabled={detail.revoked}
               onClick={() => void queueJobs([detail.id], "inventory", {})}
             >
@@ -2412,7 +2399,7 @@ function App() {
               Refresh inventory
             </button>
             {user.role !== 'viewer' && <button
-              className="button secondary small"
+              className="button secondary"
               disabled={detail.revoked || busy}
               title="Install the latest published agent on this computer"
               onClick={async () => {
@@ -2441,7 +2428,7 @@ function App() {
               Update agent
             </button>}
             <button
-              className="button secondary small"
+              className="button secondary danger-outline"
               disabled={detail.revoked}
               onClick={() => {
                 openCommand("reboot", [detail.id]);
@@ -2451,6 +2438,8 @@ function App() {
               <Power size={14} />
               Reboot
             </button>
+            </div>
+            </div>
           </div>
           <div className="tabs detail-tabs">
             <button
@@ -2532,17 +2521,6 @@ function App() {
               <EndpointDirectory inventory={detail.inventory}/>
               <div className="detail-section-title">
                 <h3>Disks & storage</h3>
-                <button
-                  className="text-button"
-                  disabled={detail.revoked}
-                  onClick={() => {
-                    setExplorer(detail);
-                    setDetail(null);
-                  }}
-                >
-                  <FolderSearch size={15} />
-                  Browse files
-                </button>
               </div>
               {detail.inventory?.disks?.length ? (
                 <div className="disk-cards">
@@ -3150,6 +3128,32 @@ function App() {
           />
         </Modal>
       )}
+      {bulkUpdate && user.role !== "viewer" && (
+        <Modal
+          title="Update agent"
+          subtitle={`${bulkUpdate.length} selected computer${bulkUpdate.length === 1 ? "" : "s"}`}
+          wide
+          onClose={() => setBulkUpdate(null)}
+        >
+          <BulkAgentUpdate
+            endpoints={active.filter((ep) => bulkUpdate.includes(ep.id))}
+            jobs={jobs}
+            request={api}
+            onQueued={() => {
+              setSelected([]);
+              void refresh();
+            }}
+            onOpenResults={(queued) => {
+              setBulkUpdate(null);
+              if (queued.length === 1) {
+                const job = jobs.find((row) => row.id === queued[0].id);
+                setJobDetail(job ?? (queued[0] as Job));
+              } else setBatch(queued as Job[]);
+            }}
+            onClose={() => setBulkUpdate(null)}
+          />
+        </Modal>
+      )}
       {batch && (
         <Modal
           title={`Results · ${batch.length} computers`}
@@ -3195,6 +3199,8 @@ function Stat({
   accent = "teal",
   footer,
   percent,
+  action,
+  onClick,
 }: {
   label: string;
   value: number;
@@ -3202,9 +3208,18 @@ function Stat({
   accent?: string;
   footer: string;
   percent?: number;
+  /** Accessible description of what clicking the card does. */
+  action?: string;
+  onClick?: () => void;
 }) {
+  const Tag = onClick ? "button" : "section";
   return (
-    <section className={`stat-card stat-${accent}`}>
+    <Tag
+      className={`stat-card stat-${accent} ${onClick ? "stat-link" : ""}`}
+      onClick={onClick}
+      title={action}
+      aria-label={onClick ? `${label}: ${value}. ${action}` : undefined}
+    >
       <div className="stat-top">
         <span>{label}</span>
         <span className="stat-icon">
@@ -3220,7 +3235,7 @@ function Stat({
         )}
       </div>
       <p>{footer}</p>
-    </section>
+    </Tag>
   );
 }
 function DetailValue({ label, value }: { label: string; value?: string }) {
