@@ -131,6 +131,13 @@
 
 ## Current limitations / next milestones
 
+## 2026-11-04 — HEALTH01 startup-update failure
+
+- HEALTH01 (Action1-installed) reports agent0.1.2, while production offers0.1.4. Read-only diagnostic job c7c253a6-3be3-4948-a90d-39fa2c832b0a confirmed LocalSystem service at the standard Program Files/ProgramData paths, no update-state/staging/log files, and current SYSTEM access to the production0.1.4 manifest.
+- Application events at17:05:01 and17:08:16 local time show `Startup update check failed (HttpRequestException); continuing with installed agent 0.1.2`. Boot17:08:08: check failed8seconds after boot. This is a transient startup-network failure, not an Action1 path/bitness issue or package retry cap. Missing `autoUpdate` property defaults to true in the agent.
+- Fix in0.1.5: retry only manifest reads on transient network/timeouts/408/429/5xx, with5s/15s/30s delays (four attempts total), a15-second deadline per request, cancellation respected. Invalid/unsafe manifests and other HTTP errors are not retried. Install-attempt limits and at-most-once job behavior unchanged; metadata retries happen before jobs or install-attempt accounting.
+- Regression test covers delayed network recovery, bounded offline attempts, unsafe manifest refusal and service cancellation. Build passes; full tests/deployment/endpoint remediation in progress. No endpoint reboot requested.
+
 - MFA/SSO and email delivery/verification remain future work.
 - Metrics are inventory snapshots (15-minute full inventory by default), not a historical time-series telemetry system.
 - No actual screen viewing until a consented visible desktop companion is built; no remote input control.

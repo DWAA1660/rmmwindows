@@ -101,7 +101,9 @@ internal sealed class AgentUpdater : IDisposable
 
     internal async Task<StagedUpdate?> PrepareAsync(string currentVersion, CancellationToken ct)
     {
-        var manifest = await FetchManifestAsync(ct);
+        // At boot the service can start before DHCP/DNS/proxy/TLS connectivity is ready.
+        // Retry only metadata reads, before recording an install attempt or claiming jobs.
+        var manifest = await FetchManifestWithRetryAsync(() => FetchManifestAsync(ct), logger, ct);
         if (!IsNewer(manifest.Version, currentVersion)) return null;
         EnsureSafeDirectory(UpdatesDirectory);
         var state = ReadState();
@@ -133,12 +135,35 @@ internal sealed class AgentUpdater : IDisposable
 
     internal async Task<AgentPackageManifest> FetchManifestAsync(CancellationToken ct)
     {
-        using var response = await client.GetAsync("api/agent-download", ct);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        using var response = await client.GetAsync("api/agent-download", deadline.Token);
         if (response.StatusCode != HttpStatusCode.OK) throw new AgentApiException((int)response.StatusCode);
-        var manifest = await response.Content.ReadFromJsonAsync<AgentPackageManifest>(AgentConfiguration.Json, ct)
+        var manifest = await response.Content.ReadFromJsonAsync<AgentPackageManifest>(AgentConfiguration.Json, deadline.Token)
             ?? throw new InvalidDataException("Empty agent package manifest.");
         ValidateManifest(manifest);
         return manifest;
+    }
+
+    internal static async Task<AgentPackageManifest> FetchManifestWithRetryAsync(
+        Func<Task<AgentPackageManifest>> fetch, ILogger logger, CancellationToken ct,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
+    {
+        delay ??= Task.Delay;
+        int[] delays = [5, 15, 30];
+        for (var attempt = 0; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { return await fetch(); }
+            catch (Exception exception) when (!ct.IsCancellationRequested && attempt < delays.Length &&
+                (exception is HttpRequestException or OperationCanceledException ||
+                 exception is AgentApiException api && (api.StatusCode is 408 or 429 || api.StatusCode >= 500)))
+            {
+                logger.LogWarning("Startup update manifest attempt {Attempt} failed ({FailureType}); retrying in {Seconds}s before accepting jobs.",
+                    attempt + 1, exception.GetType().Name, delays[attempt]);
+                await delay(TimeSpan.FromSeconds(delays[attempt]), ct);
+            }
+        }
     }
 
     internal static void ValidateManifest(AgentPackageManifest manifest)

@@ -26,6 +26,7 @@ internal static class AgentSelfTests
             ("PowerShell timeout terminates command and reports interruption", PowerShellTimeoutAsync),
             ("unsafe storage paths are rejected", StoragePathAsync),
             ("updater accepts only newer safe manifests and backs off retries", UpdaterVersionRulesAsync),
+            ("startup metadata retries transient boot failures with a strict bound", UpdaterManifestRetryAsync),
             ("updater stages only verified packages and never loops", UpdaterStagingAsync),
             ("tokenless join waits for approval, then persists the issued credential", JoinApprovalAsync),
             ("file explorer lists, copies, moves, renames and creates folders (temp only)", FileOperationsBasicAsync),
@@ -317,6 +318,31 @@ internal static class AgentSelfTests
         Assert(!AgentUpdater.MayAttempt(new("0.1.1", sha, 3, now.AddDays(-30)), good, now), "Attempt limit ignored.");
         Assert(AgentUpdater.MayAttempt(new("0.1.1", sha, 3, now), good with { Sha256 = new string('b', 64) }, now), "A new package digest was blocked by an old failure.");
         return Task.CompletedTask;
+    }
+
+    private static async Task UpdaterManifestRetryAsync()
+    {
+        var log = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        var manifest = new AgentPackageManifest("0.1.5", "win-x64", new string('a',64), 10, AgentUpdater.DownloadPath);
+        var calls = 0; var waits = new List<TimeSpan>();
+        Task Wait(TimeSpan duration, CancellationToken ct) { ct.ThrowIfCancellationRequested(); waits.Add(duration); return Task.CompletedTask; }
+        var result = await AgentUpdater.FetchManifestWithRetryAsync(() => {
+            if (++calls < 3) throw new HttpRequestException("Synthetic network not ready");
+            return Task.FromResult(manifest);
+        }, log, CancellationToken.None, Wait);
+        Assert(result == manifest && calls == 3 && waits.SequenceEqual(new[] {TimeSpan.FromSeconds(5),TimeSpan.FromSeconds(15)}), "Boot networking was not retried safely.");
+        calls = 0; waits.Clear();
+        try { await AgentUpdater.FetchManifestWithRetryAsync(() => { calls++; throw new HttpRequestException("Offline"); }, log, CancellationToken.None, Wait); }
+        catch (HttpRequestException) { }
+        Assert(calls == 4 && waits.Count == 3, "Offline startup retries were unbounded.");
+        calls = 0;
+        try { await AgentUpdater.FetchManifestWithRetryAsync(() => { calls++; throw new InvalidDataException("Unsafe manifest"); }, log, CancellationToken.None, Wait); }
+        catch (InvalidDataException) { }
+        Assert(calls == 1, "Unsafe manifest was retried.");
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel(); calls = 0;
+        try { await AgentUpdater.FetchManifestWithRetryAsync(() => { calls++; return Task.FromResult(manifest); }, log, cancelled.Token, Wait); }
+        catch (OperationCanceledException) { }
+        Assert(calls == 0, "Stopped service continued updating.");
     }
 
     private static byte[] BuildPackage(string version, byte[] executable, string? extraEntry = null, string? agentHash = null)
