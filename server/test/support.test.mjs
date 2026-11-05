@@ -186,6 +186,15 @@ test('failed launch, launch deadline and process restart terminate sessions and 
   const failed = (await f.create(a)).data;
   f.db.prepare("UPDATE jobs SET status='failed' WHERE id=?").run(failed.jobId);
   await until(() => f.db.prepare('SELECT status FROM support_sessions WHERE id=?').get(failed.id).status === 'failed', 'failed launch releases endpoint');
+  // The endpoint's fixed launch-failure explanation reaches the operator's session view.
+  const explained = (await f.create(a)).data;
+  const job = (await f.request('/agent/jobs/claim', 'POST', {}, a.auth)).data.job;
+  assert.equal((await f.request(`/agent/jobs/${job.id}/start`, 'POST', { dispatchToken: job.dispatchToken }, a.auth)).data.mayExecute, true);
+  const why = "Remote support could not start: No one is signed in to this computer's desktop right now (the console is at the Windows sign-in screen).";
+  assert.equal((await f.request(`/agent/jobs/${job.id}/complete`, 'POST', { status: 'failed', exitCode: null, summary: why }, a.auth)).status, 200);
+  const ended = (await f.request(`/support/sessions/${explained.id}`, 'GET', undefined, f.admin)).data;
+  assert.equal(ended.status, 'failed'); assert.equal(ended.reason, 'launch_failed'); assert.equal(ended.launchSummary, why);
+  assert.equal(failed.launchSummary, null, 'live sessions carry no launch summary');
   const timedOut = (await f.create(a)).data;
   f.db.prepare('UPDATE support_sessions SET created_at=? WHERE id=?').run(new Date(Date.now() - 121000).toISOString(), timedOut.id);
   await until(() => f.db.prepare('SELECT status FROM support_sessions WHERE id=?').get(timedOut.id).status === 'failed', 'bounded launch deadline');
@@ -381,4 +390,23 @@ test('monitor selection validates displays, pauses frames and input while switch
     const session = await start(); session.dev.send(JSON.stringify({ type: 'displays', displays: bad }));
     await until(() => session.status().end_reason === 'invalid_displays', 'invalid display advertisement ends the session');
   }
+});
+
+test('sign-in screen consent: allowed without a person to notify even when approval is required, audited, and never a decline', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.request('/settings/support', 'GET', undefined, f.admin)).data.approvalRequired, true, 'default policy requires approval');
+  const a = await f.enroll('0.1.10'); const session = (await f.create(a)).data; const grant = await f.launch(a, session);
+  const operator = (await f.browser(session)).ws; const device = (await f.device(session, grant)).ws;
+  await until(() => device.messages.some(m => m.type === 'state' && m.controllerConnected), 'device sees the operator');
+  device.send(JSON.stringify({ type: 'consent', approved: true, control: true, userName: 'Windows sign-in screen', decision: 'signin_screen' }));
+  await until(() => operator.messages.some(m => m.session?.status === 'active' && m.session.controlApproved), 'sign-in screen session active with control');
+  const audit = f.db.prepare("SELECT details FROM audit WHERE action='support.consent' AND target=?").get(session.id);
+  assert.equal(JSON.parse(audit.details).decision, 'signin_screen');
+  assert.equal((await f.request(`/support/sessions/${session.id}`, 'GET', undefined, f.admin)).data.consentUser, 'Windows sign-in screen');
+
+  const b = await f.enroll('0.1.10'); const other = (await f.create(b)).data; const otherGrant = await f.launch(b, other);
+  await f.browser(other); const otherDevice = (await f.device(other, otherGrant)).ws;
+  await until(() => otherDevice.messages.some(m => m.type === 'state' && m.controllerConnected), 'second device sees the operator');
+  otherDevice.send(JSON.stringify({ type: 'consent', approved: false, control: false, userName: 'Windows sign-in screen', decision: 'signin_screen' }));
+  await until(() => f.db.prepare('SELECT end_reason FROM support_sessions WHERE id=?').get(other.id).end_reason === 'invalid_consent', 'signin_screen cannot decline');
 });
