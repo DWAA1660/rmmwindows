@@ -32,7 +32,9 @@ internal sealed class SupportSecureAttentionPolicy(bool controlRequested)
 
 internal static class SupportSecureAttention
 {
-    public static (bool Success, string Message) Request(SafeAccessTokenHandle targetUser)
+    /// <param name="targetUser">The signed-in user's token, or null for a sign-in-screen session where the
+    /// LocalSystem service itself requests the secure attention sequence.</param>
+    public static (bool Success, string Message) Request(SafeAccessTokenHandle? targetUser)
     {
         try
         {
@@ -40,7 +42,8 @@ internal static class SupportSecureAttention
             // send fake key chords, or attempt to bypass secure-desktop authentication.
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", writable: false);
             if (key?.GetValue("SoftwareSASGeneration") is not int policy || policy is not (1 or 3)) return (false, "policy_not_enabled");
-            WindowsIdentity.RunImpersonated(targetUser, () => SendSAS(false));
+            if (targetUser is null) SendSAS(false);
+            else WindowsIdentity.RunImpersonated(targetUser, () => SendSAS(false));
             // SendSAS is void. This confirms only a permitted request, never a desktop transition.
             return (true, "sent");
         }

@@ -23,7 +23,8 @@ internal sealed class DesktopInput(Func<Rectangle> selectedBounds, Func<Rectangl
             {
                 var key = input.Key!;
                 var up = input.Action == "keyUp";
-                if (!up && GetForegroundWindow() == indicatorHandle()) return;
+                var protectedWindow = indicatorHandle();
+                if (!up && protectedWindow != IntPtr.Zero && GetForegroundWindow() == protectedWindow) return;
                 // Do not release an unrelated physical key the operator never pressed.
                 if (up && !pressedKeys.Contains(key)) return;
                 SendKey(key, up);
