@@ -37,4 +37,5 @@ export function mountAgentDownloads(app, { env, directory, bootstrapPath } = {})
     const script = readFileSync(template, 'utf8').replaceAll('__SERVER_ORIGIN__', origin.origin.replaceAll("'", "''"));
     res.set({ 'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="Install-LibraryRmm.ps1"' }).type('text/plain').send(script);
   });
+  return { manifest: () => manifest };
 }

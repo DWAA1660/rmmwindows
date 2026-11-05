@@ -262,3 +262,24 @@
     margin-inline: 14px;
   }
 }
+
+.group-auto-update {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: #f4f8f4;
+  border: 1px solid #e6ede5;
+  border-radius: 10px;
+}
+.group-auto-update label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+.group-auto-update input { margin-top: 3px; }
+.group-auto-update input:disabled { cursor: not-allowed; }
+.group-auto-update span { display: flex; flex-direction: column; gap: 2px; }
+.group-auto-update strong { font-size: 13px; }
+.group-auto-update small { color: #6b7d6e; font-size: 12px; line-height: 1.4; }
+.endpoint-groups .group-auto-update label { flex-direction: row; }
+.endpoint-groups .group-auto-update input[type="checkbox"] { width: auto; flex: 0 0 auto; }

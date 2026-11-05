@@ -2411,6 +2411,35 @@ function App() {
               <RefreshCw size={14} />
               Refresh inventory
             </button>
+            {user.role !== 'viewer' && <button
+              className="button secondary small"
+              disabled={detail.revoked || busy}
+              title="Install the latest published agent on this computer"
+              onClick={async () => {
+                setBusy(true);
+                setError("");
+                try {
+                  const published = await api<{ version: string }>("/agent-download").catch(() => null);
+                  const current = detail.inventory?.agentVersion || "unknown";
+                  const target = published ? `v${published.version}` : "the latest published version";
+                  const message = current === published?.version
+                    ? `${detail.displayName} already runs agent v${current}. Reinstall it anyway?`
+                    : `Update the agent on ${detail.displayName} from v${current} to ${target}?`;
+                  if (!window.confirm(`${message}\n\nThe agent restarts about 20 seconds after the job runs and the computer reconnects within a minute. An open terminal or remote support session on it will end.${detail.online ? "" : "\n\nThis computer is offline; the update runs when it reconnects."}`)) return;
+                  const result = await api<{ job: Job; duplicate: boolean }>(`/endpoints/${detail.id}/update-agent`, "POST", { idempotencyKey: crypto.randomUUID() });
+                  notify(`Agent update queued for ${detail.displayName}. It runs once.`);
+                  await refresh();
+                  setJobDetail(result.job);
+                } catch (err) {
+                  fail(err);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <ArrowDownToLine size={14} />
+              Update agent
+            </button>}
             <button
               className="button secondary small"
               disabled={detail.revoked}

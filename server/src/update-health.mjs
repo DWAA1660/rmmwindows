@@ -4,6 +4,7 @@ import { hashToken } from './security.mjs';
 // exception/transcript text here could retain URLs, paths, or credentials.
 export const UPDATE_ERROR_SUMMARIES = Object.freeze({
   disabled: 'Automatic updates are disabled.',
+  group_disabled: "Automatic updates are turned off for this computer's group.",
   unsupported_install: 'Automatic update requires a supported service installation.',
   deferred_busy: 'Update check deferred while endpoint work is active.',
   dns_error: 'Update server name could not be resolved.',

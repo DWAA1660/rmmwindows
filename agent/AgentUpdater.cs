@@ -10,7 +10,9 @@ using Microsoft.Extensions.Logging;
 
 namespace LibraryRmm.Agent;
 
-public sealed record AgentPackageManifest(string Version, string Runtime, string Sha256, long SizeBytes, string DownloadUrl);
+// AutoUpdate comes only from the authenticated per-endpoint manifest (server group setting);
+// it is null from the anonymous public manifest, which means "allowed".
+public sealed record AgentPackageManifest(string Version, string Runtime, string Sha256, long SizeBytes, string DownloadUrl, bool? AutoUpdate = null);
 internal sealed record UpdateAttemptState(string Version, string Sha256, int Attempts, DateTimeOffset LastAttemptUtc);
 internal sealed record StagedUpdate(string Version, string Directory);
 
@@ -114,6 +116,14 @@ internal sealed class AgentUpdater : IDisposable
         // Retry only metadata reads, before recording an install attempt or claiming jobs.
         var manifest = await FetchManifestWithRetryAsync(() => FetchManifestAsync(ct), logger, ct);
         activeManifest=manifest;
+        if (manifest.AutoUpdate == false)
+        {
+            // An operator turned automatic updates off for this computer's group (for example
+            // restore-protected computers). Manual updates from the console still work.
+            Report("disabled","policy","group_disabled");
+            logger.LogInformation("Automatic agent updates are turned off for this computer's group.");
+            return null;
+        }
         if (!IsNewer(manifest.Version, currentVersion)) { Report("current","complete"); return null; }
         EnsureSafeDirectory(UpdatesDirectory);
         activeStage="policy";
@@ -185,6 +195,23 @@ internal sealed class AgentUpdater : IDisposable
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        if (!string.IsNullOrEmpty(configuration.AgentToken))
+        {
+            // Per-endpoint manifest carries the group's automatic-update setting. The bearer
+            // credential only ever goes to the configured server (redirects are disabled).
+            using var request = new HttpRequestMessage(HttpMethod.Get, "api/agent/update-manifest");
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", configuration.AgentToken);
+            using var authenticated = await client.SendAsync(request, deadline.Token);
+            if (authenticated.StatusCode == HttpStatusCode.OK)
+            {
+                var scoped = await authenticated.Content.ReadFromJsonAsync<AgentPackageManifest>(AgentConfiguration.Json, deadline.Token)
+                    ?? throw new InvalidDataException("Empty agent package manifest.");
+                ValidateManifest(scoped);
+                return scoped;
+            }
+            // Only an older server without the route falls back to the anonymous manifest.
+            if (authenticated.StatusCode != HttpStatusCode.NotFound) throw new AgentApiException((int)authenticated.StatusCode);
+        }
         using var response = await client.GetAsync("api/agent-download", deadline.Token);
         if (response.StatusCode != HttpStatusCode.OK) throw new AgentApiException((int)response.StatusCode);
         var manifest = await response.Content.ReadFromJsonAsync<AgentPackageManifest>(AgentConfiguration.Json, deadline.Token)

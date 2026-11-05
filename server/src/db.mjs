@@ -113,6 +113,13 @@ export function openDatabase(filename) {
       CREATE INDEX IF NOT EXISTS endpoint_update_history_endpoint ON endpoint_update_history(endpoint_id,id DESC);
       PRAGMA user_version=9;`);
   });
+  // v10: per-group automatic agent updates (default on). Restore-protected computers can be
+  // placed in a group with updates off so they don't download a package on every boot.
+  transaction(db, () => {
+    const groupColumns = new Set(db.prepare('PRAGMA table_info(endpoint_groups)').all().map(column => column.name));
+    if (!groupColumns.has('auto_update')) db.exec('ALTER TABLE endpoint_groups ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 1');
+    db.exec('PRAGMA user_version=10;');
+  });
   return db;
 }
 
