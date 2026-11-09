@@ -26,7 +26,7 @@ test('type labels and byte formatting', () => {
 });
 
 test('folder downloads explain old agents and list every left-out item', () => {
-  assert.match(downloadErrorText('Folders cannot be downloaded; download individual files.', true), /older agent.*0\.1\.13/);
+  assert.match(downloadErrorText('Folders cannot be downloaded; download individual files.', true), /older agent.*0\.1\.14/);
   assert.equal(downloadErrorText('File not found: C:\\x', false), 'File not found: C:\\x');
   assert.deepEqual(leftOutItems({ ok: true, name: 'Logs.zip', skippedCount: 0, skipped: [] }), []);
   const items = leftOutItems({ ok: true, name: 'Logs.zip', skippedCount: 502, skippedListTruncated: true,
@@ -43,7 +43,7 @@ test('upload and extract helpers', () => {
   assert.ok(isZip('a.ZIP') && !isZip('a.zip.txt'));
   assert.equal(uploadNameProblem('report ü.pdf'), null);
   for (const bad of ['', 'a:b.txt', 'CON.txt', 'name.', 'a\\b', 'x'.repeat(256)]) assert.ok(uploadNameProblem(bad), bad);
-  assert.match(agentErrorText('Unsupported file action; nothing was changed.'), /older agent.*0\.1\.13/);
+  assert.match(agentErrorText('Unsupported file action; nothing was changed.'), /older agent.*0\.1\.14/);
   assert.equal(agentErrorText('Access denied'), 'Access denied');
   assert.equal(MAX_UPLOAD_BYTES, 1024 ** 3);
 });
