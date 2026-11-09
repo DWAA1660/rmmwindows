@@ -191,3 +191,100 @@ test('stored files expire after the retention period and orphaned files are remo
   assert.deepEqual(readdirSync(join(folder, 'files')), []);
   assert.equal((await call(`/jobs/${job.id}/file`, { session: admin })).status, 410);
 });
+
+test('uploads: owner-only chunked upload, server-authoritative job payload, agent fetch only while running, cleanup', async t => {
+  const { call, admin, queue, enrolled, folder, service, login } = await harness(t, { maxFileBytes: 6 * 1024 * 1024, maxTotalFileBytes: 10 * 1024 * 1024 });
+  const bearer = enrolled.agentToken;
+  const bytes = randomBytes(5 * 1024 * 1024 + 99);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const parts = [bytes.subarray(0, 4 * 1024 * 1024), bytes.subarray(4 * 1024 * 1024)];
+
+  for (const body of [{ name: '..', sizeBytes: 1 }, { name: 'a\\b.txt', sizeBytes: 1 }, { name: 'CON.txt', sizeBytes: 1 }, { name: 'x.txt', sizeBytes: -1 },
+    { name: 'x.txt', sizeBytes: 6 * 1024 * 1024 + 1 }, { name: 'x.txt', sizeBytes: 1.5 }, { name: 'x.txt' }])
+    assert.equal((await call('/uploads', { method: 'POST', session: admin, body })).status, 400, JSON.stringify(body));
+  assert.equal((await call('/uploads', { method: 'POST', body: { name: 'x.txt', sizeBytes: 1 } })).status, 401);
+  assert.equal((await call('/uploads', { method: 'POST', session: { cookie: admin.cookie, csrf: 'wrong' }, body: { name: 'x.txt', sizeBytes: 1 } })).status, 403, 'CSRF token required');
+
+  const created = await call('/uploads', { method: 'POST', session: admin, body: { name: 'installer ü.zip', sizeBytes: bytes.length } });
+  assert.equal(created.status, 201);
+  const id = created.data.id;
+  assert.equal(created.data.chunkBytes, 4 * 1024 * 1024);
+  assert.equal((await call('/uploads', { method: 'POST', session: admin, body: { name: 'second.bin', sizeBytes: 6 * 1024 * 1024 } })).status, 507, 'the declared size is reserved against the total cap');
+
+  // Another operator cannot extend, finish, delete or send this upload; viewers cannot upload.
+  await call('/users', { method: 'POST', session: admin, body: { username: 'operator2', email: '', role: 'operator', password: 'operator-password-2', currentPassword: 'isolated-files-password' } });
+  const other = await login('operator2', 'operator-password-2');
+  assert.equal((await call(`/uploads/${id}/chunks/0`, { method: 'PUT', session: other, raw: parts[0] })).status, 404);
+  assert.equal((await call(`/uploads/${id}/complete`, { method: 'POST', session: other, body: {} })).status, 404);
+  assert.equal((await call(`/uploads/${id}`, { method: 'DELETE', session: other })).status, 404);
+  await call('/users', { method: 'POST', session: admin, body: { username: 'viewer3', email: '', role: 'viewer', password: 'viewer-password-3', currentPassword: 'isolated-files-password' } });
+  assert.equal((await call('/uploads', { method: 'POST', session: await login('viewer3', 'viewer-password-3'), body: { name: 'x.txt', sizeBytes: 1 } })).status, 403);
+
+  assert.equal((await call(`/uploads/${id}/chunks/1`, { method: 'PUT', session: admin, raw: parts[1] })).status, 409, 'gap rejected');
+  assert.equal((await call(`/uploads/${id}/chunks/0`, { method: 'PUT', session: admin, raw: Buffer.alloc(4 * 1024 * 1024 + 1) })).status, 413);
+  assert.equal((await call(`/uploads/${id}/chunks/0`, { method: 'PUT', session: admin, raw: parts[0] })).data.receivedBytes, parts[0].length);
+  assert.equal((await call(`/uploads/${id}/chunks/0`, { method: 'PUT', session: admin, raw: parts[0] })).data.duplicate, true);
+  assert.equal((await call(`/uploads/${id}/chunks/0`, { method: 'PUT', session: admin, raw: randomBytes(9) })).status, 409);
+  assert.equal((await call(`/uploads/${id}/complete`, { method: 'POST', session: admin, body: {} })).status, 409, 'cannot finish early');
+  assert.equal((await queue({ action: 'upload', uploadId: id, destinationDirectory: 'C:\\Temp' })).status, 409, 'an unfinished upload cannot be sent');
+  assert.equal((await call(`/uploads/${id}/chunks/1`, { method: 'PUT', session: admin, raw: Buffer.concat([parts[1], Buffer.from('x')]) })).status, 413, 'more than declared rejected');
+  await call(`/uploads/${id}/chunks/1`, { method: 'PUT', session: admin, raw: parts[1] });
+  const finished = await call(`/uploads/${id}/complete`, { method: 'POST', session: admin, body: {} });
+  assert.equal(finished.data.sha256, sha256, 'server hashes the received bytes');
+  assert.equal((await call(`/uploads/${id}/complete`, { method: 'POST', session: admin, body: {} })).data.status, 'complete', 'idempotent');
+  assert.deepEqual(readdirSync(join(folder, 'files', 'uploads')), [`${id}.upload`], 'stored by UUID, never by the uploaded name');
+
+  // Job payload: name/size/hash come from the server; anything the browser sends for them is ignored.
+  assert.equal((await queue({ action: 'upload', uploadId: id, destinationDirectory: '\\\\server\\share' })).status, 400);
+  assert.equal((await queue({ action: 'upload', uploadId: 'not-a-uuid', destinationDirectory: 'C:\\Temp' })).status, 400);
+  assert.equal((await queue({ action: 'upload', uploadId: randomUUID(), destinationDirectory: 'C:\\Temp' })).status, 404);
+  assert.equal((await call('/jobs', { method: 'POST', session: other, body: { endpointIds: [enrolled.endpointId], kind: 'files', payload: { action: 'upload', uploadId: id, destinationDirectory: 'C:\\Temp' } } })).status, 404, 'other accounts cannot send it');
+  const queued = await queue({ action: 'upload', uploadId: id, destinationDirectory: 'C:\\Temp', name: 'evil.exe', sha256: '0'.repeat(64), sizeBytes: 1 });
+  assert.equal(queued.status, 201);
+  const job = queued.data.jobs[0];
+  assert.deepEqual(job.payload, { action: 'upload', uploadId: id, name: 'installer ü.zip', sizeBytes: bytes.length, sha256, destinationDirectory: 'C:\\Temp', overwrite: false });
+  assert.ok(service.db.prepare("SELECT 1 FROM audit WHERE action='files.upload' AND target=?").get(job.id), 'upload jobs are audited');
+  assert.ok(service.db.prepare("SELECT 1 FROM audit WHERE action='file.upload.received' AND target=?").get(id));
+
+  // The agent can fetch bytes only for its own job, only while running.
+  const fetchRange = (jobId, offset, length, token = bearer) => call(`/agent/jobs/${jobId}/upload?offset=${offset}&length=${length}`, { bearer: token });
+  assert.equal((await fetchRange(job.id, 0, 1024)).status, 409, 'not before the job is running');
+  const claimed = (await call('/agent/jobs/claim', { method: 'POST', bearer, body: {} })).data.job;
+  assert.equal((await fetchRange(job.id, 0, 1024)).status, 409, 'not before start authorization');
+  await call(`/agent/jobs/${claimed.id}/start`, { method: 'POST', bearer, body: { dispatchToken: claimed.dispatchToken } });
+  assert.equal((await call(`/agent/jobs/${job.id}/upload?offset=0&length=10`)).status, 401);
+  const token2 = (await call('/enrollment-tokens', { method: 'POST', session: admin, body: { label: 'second' } })).data.token;
+  const second = (await call('/agent/enroll', { method: 'POST', body: { enrollmentToken: token2, deviceId: randomUUID(), hostname: 'BRANCH-PC-02' } })).data;
+  assert.equal((await fetchRange(job.id, 0, 1024, second.agentToken)).status, 404, 'another endpoint cannot read this upload');
+  assert.equal((await fetchRange(job.id, 0, 4 * 1024 * 1024 + 1)).status, 400);
+  assert.equal((await fetchRange(job.id, bytes.length, 10)).status, 400, 'offset past the end');
+  assert.equal((await call(`/agent/jobs/${job.id}/upload?offset=-1&length=10`, { bearer })).status, 400);
+  const first = await fetchRange(job.id, 0, 4 * 1024 * 1024);
+  const rest = await fetchRange(job.id, 4 * 1024 * 1024, 4 * 1024 * 1024);
+  assert.equal(first.headers.get('x-content-sha256'), sha256);
+  assert.ok(Buffer.concat([first.data, rest.data]).equals(bytes), 'agent receives the exact bytes');
+  assert.equal((await call(`/uploads/${id}`, { method: 'DELETE', session: admin })).status, 409, 'cannot delete while a computer is receiving it');
+  await call(`/agent/jobs/${job.id}/complete`, { method: 'POST', bearer, body: { status: 'succeeded', exitCode: 0, summary: 'Saved' } });
+  assert.equal((await fetchRange(job.id, 0, 10)).status, 409, 'not after completion');
+
+  // Freed an hour after its last delivering job finished; then it can no longer be sent.
+  assert.equal(service.cleanupFiles(Date.now() + 30 * 60000), 0);
+  assert.equal(service.cleanupFiles(Date.now() + 61 * 60000), 1);
+  assert.deepEqual(readdirSync(join(folder, 'files', 'uploads')), []);
+  assert.equal((await queue({ action: 'upload', uploadId: id, destinationDirectory: 'C:\\Temp' })).status, 410);
+
+  // Unused uploads can be deleted by their owner; empty files need no chunks.
+  const empty = (await call('/uploads', { method: 'POST', session: admin, body: { name: 'empty.txt', sizeBytes: 0 } })).data;
+  assert.equal((await call(`/uploads/${empty.id}/complete`, { method: 'POST', session: admin, body: {} })).data.sha256, createHash('sha256').digest('hex'));
+  assert.equal((await call(`/uploads/${empty.id}`, { method: 'DELETE', session: admin })).status, 200);
+  assert.equal((await queue({ action: 'upload', uploadId: empty.id, destinationDirectory: 'C:\\Temp' })).status, 410);
+});
+
+test('extract payloads accept only local .zip sources and local destinations', async t => {
+  const { queue } = await harness(t);
+  for (const payload of [{ action: 'extract', path: 'C:\\a.txt', destinationDirectory: 'C:\\a' }, { action: 'extract', path: '\\\\server\\a.zip', destinationDirectory: 'C:\\a' },
+    { action: 'extract', path: 'C:\\a.zip', destinationDirectory: 'relative' }, { action: 'extract', path: 'C:\\a.zip' }])
+    assert.equal((await queue(payload)).status, 400, JSON.stringify(payload));
+  assert.deepEqual((await queue({ action: 'extract', path: 'C:\\Temp\\a.ZIP', destinationDirectory: 'C:\\Temp\\a', overwrite: true })).data.jobs[0].payload,
+    { action: 'extract', path: 'C:\\Temp\\a.ZIP', destinationDirectory: 'C:\\Temp\\a', overwrite: true });
+});

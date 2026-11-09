@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   ArrowUp, Calculator, ChevronRight, ClipboardPaste, Copy, Download, Eye, EyeOff, File, FileArchive, Folder, FolderPlus,
-  HardDrive, Link2, Loader2, Monitor, Pencil, RefreshCw, Scissors, Trash2, TriangleAlert, X,
+  HardDrive, Link2, Loader2, Monitor, PackageOpen, Pencil, RefreshCw, Scissors, Trash2, TriangleAlert, Upload, X,
 } from 'lucide-react';
-import { joinPath, parentPath, crumbs, typeLabel, formatBytes, downloadErrorText, leftOutItems, type DownloadResult } from './fileExplorerModel';
+import {
+  joinPath, parentPath, crumbs, typeLabel, formatBytes, downloadErrorText, leftOutItems, agentErrorText, isZip, extractDestination,
+  uploadNameProblem, MAX_UPLOAD_BYTES, type DownloadResult,
+} from './fileExplorerModel';
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type JobInfo = { id: string; status: string; summary?: string | null };
@@ -17,7 +20,9 @@ type Listing = { path: string; entries: FileEntry[]; drives: Drive[]; truncated:
 type ItemResult = { path: string; ok: boolean; error?: string | null; target?: string | null; note?: string | null };
 type Outcome = { action: string; ok: boolean; error?: string; succeeded?: number; failed?: number; results?: ItemResult[] };
 type SortKey = 'name' | 'size' | 'modified' | 'type';
-type Activity = { label: string; jobId?: string; status?: string; since: number };
+type Activity = { label: string; jobId?: string; status?: string; since: number; progress?: number; cancel?: () => void };
+/** A finished upload on the server, ready to be saved on the computer. */
+type StoredUpload = { uploadId: string; name: string };
 
 const TERMINAL = ['succeeded', 'failed', 'interrupted', 'cancelled'];
 const POLL_MS = 350;
@@ -71,9 +76,13 @@ export function FileExplorer({ endpoint, request, canWrite }: {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [failures, setFailures] = useState<{ title: string; items: ItemResult[]; retry?: () => void; tone?: 'warning' } | null>(null);
-  const [dialog, setDialog] = useState<null | { kind: 'delete' } | { kind: 'rename'; entry: FileEntry } | { kind: 'mkdir' }>(null);
+  const [dialog, setDialog] = useState<null | { kind: 'delete' } | { kind: 'rename'; entry: FileEntry } | { kind: 'mkdir' } | { kind: 'extract'; entry: FileEntry }>(null);
   const [nameInput, setNameInput] = useState('');
   const [recursive, setRecursive] = useState(true);
+  const [replaceExisting, setReplaceExisting] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const uploadCancelled = useRef(false);
   const [renderLimit, setRenderLimit] = useState(RENDER_STEP);
   const [now, setNow] = useState(Date.now());
   const busy = opActivity !== null;
@@ -160,7 +169,7 @@ export function FileExplorer({ endpoint, request, canWrite }: {
       const { job, result } = await runJob<Outcome>(request, endpoint.id, 'files', payload, 1800,
         update => setOpActivity(activity => activity && { ...activity, jobId: update.id, status: update.status }));
       if (!result) throw new Error(failureText(job, 'The computer did not report a result.'));
-      if (result.error) throw new Error(result.error);
+      if (result.error) throw new Error(agentErrorText(result.error));
       const failed = (result.results || []).filter(item => !item.ok);
       if (failed.length) setFailures({ title: `${result.succeeded ?? 0} succeeded, ${failed.length} failed`, items: failed });
       else setNotice(job.summary || 'Done.');
@@ -212,6 +221,108 @@ export function FileExplorer({ endpoint, request, canWrite }: {
     if (leftOut.length) setFailures({ title: leftOutTitle, items: leftOut, tone: 'warning' });
   };
 
+  /** Refreshes a folder's listing if it is still the one on screen; otherwise just forgets the cached copy. */
+  const refreshIfShowing = (folder: string) => {
+    cache.current.delete(folder);
+    if (listingRef.current?.path === folder) void open(folder, { keepMessages: true });
+  };
+
+  /** Queues the at-most-once job that saves a finished upload on the computer. */
+  const deliver = async (upload: StoredUpload, folder: string, overwrite: boolean, label: string) => {
+    setOpActivity({ label, since: Date.now() });
+    const { job, result } = await runJob<{ ok: boolean; error?: string; path?: string }>(request, endpoint.id, 'files',
+      { action: 'upload', uploadId: upload.uploadId, destinationDirectory: folder, overwrite }, 3600,
+      update => setOpActivity(activity => activity && { ...activity, jobId: update.id, status: update.status }));
+    if (!result?.ok) throw new Error(agentErrorText(result?.error || failureText(job, `${upload.name} could not be saved.`)));
+  };
+
+  const reportUploads = (folder: string, saved: string[], problems: ItemResult[], conflicts: StoredUpload[]) => {
+    setOpActivity(null);
+    if (problems.length) {
+      setFailures({ title: `${saved.length} uploaded, ${problems.length} not uploaded`, items: problems,
+        retry: conflicts.length ? () => void replaceUploads(folder, conflicts) : undefined });
+    } else setNotice(saved.length === 1 ? `${saved[0]} was uploaded to ${folder}.` : `${saved.length} files were uploaded to ${folder}.`);
+    refreshIfShowing(folder);
+  };
+
+  /** Sends files from this browser to the computer: browser -> server (chunked) -> one job per file. */
+  const uploadFiles = async (picked: File[], skipped: ItemResult[] = []) => {
+    const folder = listingRef.current?.path;
+    if (!folder || (!picked.length && !skipped.length)) return;
+    setError(''); setNotice(''); setFailures(null);
+    uploadCancelled.current = false;
+    const problems: ItemResult[] = [...skipped];
+    const conflicts: StoredUpload[] = [];
+    const saved: string[] = [];
+    for (const [index, file] of picked.entries()) {
+      const target = joinPath(folder, file.name);
+      if (uploadCancelled.current) { problems.push({ path: target, ok: false, error: 'Not uploaded: the upload was cancelled.' }); continue; }
+      const position = picked.length > 1 ? ` (${index + 1} of ${picked.length})` : '';
+      const nameProblem = uploadNameProblem(file.name);
+      if (nameProblem) { problems.push({ path: target, ok: false, error: nameProblem }); continue; }
+      if (file.size > MAX_UPLOAD_BYTES) { problems.push({ path: target, ok: false, error: `${formatBytes(file.size)} is larger than the 1 GiB upload limit.` }); continue; }
+      let uploadId: string | null = null;
+      try {
+        setOpActivity({ label: `Uploading ${file.name} to the server${position}`, since: Date.now(), progress: 0, cancel: () => { uploadCancelled.current = true; } });
+        const created = await request<{ id: string; chunkBytes: number }>('/uploads', 'POST', { name: file.name, sizeBytes: file.size });
+        uploadId = created.id;
+        for (let offset = 0, sequence = 0; offset < file.size; offset += created.chunkBytes, sequence++) {
+          if (uploadCancelled.current) throw new Error('Not uploaded: the upload was cancelled.');
+          await request(`/uploads/${created.id}/chunks/${sequence}`, 'PUT', file.slice(offset, offset + created.chunkBytes));
+          const done = Math.min(file.size, offset + created.chunkBytes) / file.size;
+          setOpActivity(activity => activity && { ...activity, progress: done });
+        }
+        await request(`/uploads/${created.id}/complete`, 'POST', {});
+        if (uploadCancelled.current) throw new Error('Not uploaded: the upload was cancelled.');
+        const stored = { uploadId: created.id, name: file.name };
+        try {
+          await deliver(stored, folder, false, `Saving ${file.name} on ${endpoint.name}${position}`);
+          saved.push(file.name);
+          uploadId = null; // delivered; the server frees its copy automatically
+        } catch (e) {
+          // Keep the server copy so "Replace existing items" can resend it without uploading again.
+          if (/already exists/i.test((e as Error).message) && !/folder named/i.test((e as Error).message)) { conflicts.push(stored); uploadId = null; }
+          throw e;
+        }
+      } catch (e) {
+        problems.push({ path: target, ok: false, error: (e as Error).message });
+      } finally {
+        if (uploadId) void request(`/uploads/${uploadId}`, 'DELETE').catch(() => { /* expires on its own */ });
+      }
+    }
+    reportUploads(folder, saved, problems, conflicts);
+  };
+
+  const replaceUploads = async (folder: string, conflicts: StoredUpload[]) => {
+    setError(''); setNotice(''); setFailures(null);
+    const problems: ItemResult[] = [];
+    const saved: string[] = [];
+    for (const [index, upload] of conflicts.entries()) {
+      try {
+        await deliver(upload, folder, true, `Replacing ${upload.name} on ${endpoint.name}${conflicts.length > 1 ? ` (${index + 1} of ${conflicts.length})` : ''}`);
+        saved.push(upload.name);
+      } catch (e) { problems.push({ path: joinPath(folder, upload.name), ok: false, error: (e as Error).message }); }
+    }
+    reportUploads(folder, saved, problems, []);
+  };
+
+  /** Files dropped from the computer's desktop. Folders cannot be sent directly; zip them first. */
+  const dropFiles = (event: DragEvent) => {
+    event.preventDefault();
+    setDragging(false);
+    if (busy || !listingRef.current?.path) return;
+    const files: File[] = [];
+    const skipped: ItemResult[] = [];
+    for (const item of Array.from(event.dataTransfer.items)) {
+      if (item.kind !== 'file') continue;
+      const entry = item.webkitGetAsEntry?.();
+      const file = item.getAsFile();
+      if (entry?.isDirectory) skipped.push({ path: entry.name, ok: false, error: 'Folders cannot be uploaded directly. Zip the folder, upload the .zip, then choose Extract.' });
+      else if (file) files.push(file);
+    }
+    void uploadFiles(files, skipped);
+  };
+
   const paste = (overwrite = false, paths = clipboard?.paths || []) => {
     if (!clipboard || !listing?.path) return;
     const mode = clipboard.mode;
@@ -256,6 +367,18 @@ export function FileExplorer({ endpoint, request, canWrite }: {
       const paths = selectedEntries.map(entry => entry.path);
       setDialog(null);
       void mutate(`Deleting ${paths.length} item(s)`, { action: 'delete', paths, recursive }, () => setSelected(new Set()));
+    } else if (dialog.kind === 'extract') {
+      const destination = nameInput.trim();
+      if (!destination) return;
+      const zip = dialog.entry;
+      setDialog(null);
+      const run = (overwrite: boolean) => void mutate(`Extracting ${zip.name} to ${destination}`,
+        { action: 'extract', path: zip.path, destinationDirectory: destination, overwrite },
+        outcome => {
+          if (!overwrite && (outcome.results || []).some(item => /already exists/i.test(item.error || '')))
+            setFailures(previous => previous && { ...previous, retry: () => run(true) });
+        });
+      run(replaceExisting);
     } else if (dialog.kind === 'rename') {
       const name = nameInput.trim();
       if (!name || name === dialog.entry.name) { setDialog(null); return; }
@@ -278,9 +401,16 @@ export function FileExplorer({ endpoint, request, canWrite }: {
   const atRoot = !listing || listing.path === '';
   const hasFolderSelected = selectedEntries.some(entry => entry.type === 'directory');
   const onlyFolders = hasFolderSelected && selectedEntries.every(entry => entry.type === 'directory');
+  const selectedZip = selectedEntries.length === 1 && selectedEntries[0].type === 'file' && !selectedEntries[0].reparse && isZip(selectedEntries[0].name) ? selectedEntries[0] : null;
+  const acceptsDrop = !atRoot && !busy && !!listing;
 
   return (
-    <div className="fx">
+    <div className={`fx${dragging ? ' fx-dragging' : ''}`}
+      onDragOver={event => { if (acceptsDrop && event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragging(true); } }}
+      onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+      onDrop={event => { if (acceptsDrop) dropFiles(event); else { event.preventDefault(); setDragging(false); } }}>
+      {dragging && <div className="fx-drop" aria-hidden><Upload size={22} /> Drop files to upload them to {currentPath}</div>}
+      <input ref={fileInput} type="file" multiple hidden onChange={event => { const picked = Array.from(event.target.files || []); event.target.value = ''; void uploadFiles(picked); }} />
       {!endpoint.online && (
         <div className="fx-banner"><TriangleAlert size={15} /> {endpoint.name} is offline. Requests wait in the queue until it reconnects (you can cancel them).</div>
       )}
@@ -312,6 +442,12 @@ export function FileExplorer({ endpoint, request, canWrite }: {
             onClick={() => void downloadSelected()}>
             {onlyFolders ? <FileArchive size={14} /> : <Download size={14} />} {onlyFolders ? 'Download as .zip' : 'Download'}
           </button>
+          <button className="button secondary small" disabled={busy} title={`Upload files from this browser to ${currentPath} (up to 1 GiB each; you can also drag files here)`}
+            onClick={() => fileInput.current?.click()}><Upload size={14} /> Upload</button>
+          <button className="button secondary small" disabled={busy || !selectedZip} title={selectedZip ? `Extract ${selectedZip.name} on ${endpoint.name}` : 'Select one .zip file to extract it'}
+            onClick={() => { if (!selectedZip) return; setNameInput(extractDestination(selectedZip.path)); setReplaceExisting(false); setDialog({ kind: 'extract', entry: selectedZip }); }}>
+            <PackageOpen size={14} /> Extract
+          </button>
           <button className="button secondary small" disabled={busy || !selected.size} onClick={() => { setClipboard({ mode: 'copy', paths: selectedEntries.map(entry => entry.path), from: currentPath }); setNotice(`${selected.size} item(s) copied. Open a folder and choose Paste.`); }}><Copy size={14} /> Copy</button>
           <button className="button secondary small" disabled={busy || !selected.size} onClick={() => { setClipboard({ mode: 'cut', paths: selectedEntries.map(entry => entry.path), from: currentPath }); setNotice(`${selected.size} item(s) cut. Open a folder and choose Paste to move them.`); }}><Scissors size={14} /> Cut</button>
           <button className="button secondary small" disabled={busy || !clipboard} title={clipboard ? `${clipboard.mode === 'cut' ? 'Move' : 'Copy'} ${clipboard.paths.length} item(s) here` : 'Copy or cut items first'} onClick={() => paste()}>
@@ -338,7 +474,9 @@ export function FileExplorer({ endpoint, request, canWrite }: {
       {activity && (
         <div className="fx-status" role="status">
           <Loader2 size={14} className="spin" />
-          <span>{activity.label}…{activity.status === 'queued' && waitingSeconds >= 3 ? ` Waiting for ${endpoint.name} to pick it up (${waitingSeconds}s).` : ''}</span>
+          <span>{activity.label}{activity.progress !== undefined ? ` — ${Math.floor(activity.progress * 100)}%` : ''}…{activity.status === 'queued' && waitingSeconds >= 3 ? ` Waiting for ${endpoint.name} to pick it up (${waitingSeconds}s).` : ''}</span>
+          {activity.progress !== undefined && <span className="progress-track fx-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(activity.progress * 100)}><span style={{ width: `${activity.progress * 100}%` }} /></span>}
+          {activity.cancel && activity.progress !== undefined && <button className="text-button" onClick={activity.cancel}>Cancel</button>}
           {activity.status === 'queued' && waitingSeconds >= 3 && <button className="text-button" onClick={() => void cancelQueued(activity)}>Cancel</button>}
         </div>
       )}
@@ -357,8 +495,20 @@ export function FileExplorer({ endpoint, request, canWrite }: {
       )}
 
       {dialog && (
-        <div className="fx-dialog" role="dialog" aria-modal="false" aria-label={dialog.kind === 'delete' ? 'Confirm delete' : dialog.kind === 'rename' ? 'Rename' : 'New folder'}>
-          {dialog.kind === 'delete' ? (
+        <div className="fx-dialog" role="dialog" aria-modal="false" aria-label={dialog.kind === 'delete' ? 'Confirm delete' : dialog.kind === 'rename' ? 'Rename' : dialog.kind === 'extract' ? 'Extract zip' : 'New folder'}>
+          {dialog.kind === 'extract' ? (
+            <form onSubmit={event => { event.preventDefault(); submitDialog(); }}>
+              <label>Extract {dialog.entry.name} on {endpoint.name} into this folder (created if it does not exist)
+                <input autoFocus value={nameInput} maxLength={4096} onChange={event => setNameInput(event.target.value)} spellCheck={false} />
+              </label>
+              <label className="fx-check"><input type="checkbox" checked={replaceExisting} onChange={event => setReplaceExisting(event.target.checked)} /> Replace files that already exist there</label>
+              <p className="muted fx-hint">Entries that would land outside this folder, pass through links or go into protected system folders are skipped and listed.</p>
+              <div className="fx-dialog-actions">
+                <button type="button" className="button secondary small" onClick={() => setDialog(null)}>Cancel</button>
+                <button type="submit" className="button primary small" disabled={!nameInput.trim()}><PackageOpen size={14} /> Extract</button>
+              </div>
+            </form>
+          ) : dialog.kind === 'delete' ? (
             <>
               <strong>Permanently delete {selectedEntries.length} item(s) from {endpoint.name}?</strong>
               <p>Files are removed from the disk, not moved to the Recycle Bin. This cannot be undone.</p>

@@ -50,11 +50,37 @@ export type DownloadResult = {
   skippedCount?: number; skipped?: { path: string; error: string }[]; skippedListTruncated?: boolean;
 };
 
-/** Agents before 0.1.13 refuse folders with this text; tell the operator how to fix it. */
+/** Agents before 0.1.13 cannot zip folders, upload or extract; tell the operator how to fix it. */
 export function downloadErrorText(error: string, isFolder: boolean): string {
-  return isFolder && /folders cannot be downloaded/i.test(error)
-    ? 'This computer runs an older agent that cannot zip folders. Update its agent (0.1.13 or newer) and try again.'
+  if (isFolder && /folders cannot be downloaded/i.test(error))
+    return 'This computer runs an older agent that cannot zip folders. Update its agent (0.1.13 or newer) and try again.';
+  return agentErrorText(error);
+}
+
+export function agentErrorText(error: string): string {
+  return /unsupported file action/i.test(error)
+    ? 'This computer runs an older agent that cannot do this yet. Update its agent (0.1.13 or newer) and try again.'
     : error;
+}
+
+/** Largest single upload the server accepts (matches the server's per-file cap). */
+export const MAX_UPLOAD_BYTES = 1024 ** 3;
+
+export const isZip = (name: string) => /\.zip$/i.test(name);
+
+/** Default "Extract to" folder: next to the zip, named after it ("C:\a\b.zip" -> "C:\a\b"). */
+export function extractDestination(zipPath: string): string {
+  const folder = parentPath(zipPath);
+  const name = zipPath.slice(zipPath.lastIndexOf('\\') + 1).replace(/\.zip$/i, '').replace(/[. ]+$/, '') || 'extracted';
+  return joinPath(folder, name);
+}
+
+/** Names the server/agent would refuse, checked before spending time on an upload. */
+export function uploadNameProblem(name: string): string | null {
+  if (!name || name.length > 255) return 'Names must be 1 to 255 characters.';
+  if (/[\u0000-\u001f\\/:*?"<>|]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])$/i.test(name.split('.')[0].trimEnd()))
+    return 'Windows does not allow this file name.';
+  return null;
 }
 
 /** Items a folder zip left out (in use, links, agent data), including an explicit line when the list was cut short. */

@@ -218,6 +218,36 @@ try {
   assert.ok(!existsSync(join(agentDir, 'download-staging')) || (await import('node:fs')).readdirSync(join(agentDir, 'download-staging')).length === 0, 'the temporary zip was removed from the endpoint');
   console.log(`PASS folder download: ${zipped.result.size}-byte zip, every extracted file identical, empty folder kept, staging cleaned.`);
 
+  // Upload that zip back through the console routes, save it on the endpoint, then extract it there.
+  phase('File explorer: upload a zip to the endpoint and extract it remotely.');
+  const zipBytes = await readFile(zipPath);
+  const raw = async (path, method, body) => {
+    const response = await fetch(base + '/api' + path, { method, headers: { Origin: 'http://rmm.test', Cookie: cookie, 'X-CSRF-Token': csrf, 'Content-Type': 'application/octet-stream' }, body, signal: AbortSignal.timeout(15000) });
+    assert.ok(response.ok, `${method} ${path}: ${response.status}`);
+    return response.json();
+  };
+  const upload = await api('/uploads', { method: 'POST', body: { name: 'Upload ü.zip', sizeBytes: zipBytes.length } });
+  for (let offset = 0, sequence = 0; offset < zipBytes.length; offset += upload.chunkBytes, sequence++)
+    await raw(`/uploads/${upload.id}/chunks/${sequence}`, 'PUT', zipBytes.subarray(offset, offset + upload.chunkBytes));
+  const stored = await api(`/uploads/${upload.id}/complete`, { method: 'POST', body: {} });
+  const uploadTarget = join(sample, 'Uploads');
+  await mkdir(uploadTarget);
+  const sent = await runFiles({ action: 'upload', uploadId: upload.id, destinationDirectory: uploadTarget }, 600);
+  assert.equal(sent.job.status, 'succeeded', sent.job.summary);
+  assert.equal(sent.result.sha256, stored.sha256);
+  assert.deepEqual(await readFile(join(uploadTarget, 'Upload ü.zip')), zipBytes, 'the uploaded zip is identical on the endpoint');
+  const again = await runFiles({ action: 'upload', uploadId: upload.id, destinationDirectory: uploadTarget }, 600);
+  assert.equal(again.job.status, 'failed');
+  assert.match(again.result.error, /already exists/);
+  const unpacked = await runFiles({ action: 'extract', path: join(uploadTarget, 'Upload ü.zip'), destinationDirectory: join(uploadTarget, 'Upload ü') }, 600);
+  assert.equal(unpacked.job.status, 'succeeded', unpacked.job.summary);
+  assert.equal(unpacked.result.files, 2);
+  assert.deepEqual(await readFile(join(uploadTarget, 'Upload ü', 'Zip Me ü', 'nested', 'data.bin')), nestedBytes);
+  assert.equal(await readFile(join(uploadTarget, 'Upload ü', 'Zip Me ü', 'readme.txt'), 'utf8'), 'folder download ✓');
+  const protectedTry = await runFiles({ action: 'upload', uploadId: upload.id, destinationDirectory: agentDir }, 600);
+  assert.equal(protectedTry.job.status, 'failed', 'the agent data folder is never a destination');
+  console.log(`PASS upload + extract: ${zipBytes.length}-byte zip uploaded in ${Math.ceil(zipBytes.length / upload.chunkBytes)} chunk(s), saved identical, conflict refused, extracted identical, protected destination refused.`);
+
   phase('Persistent terminal: state across separate authorized jobs, then explicit close while running.');
   const terminal = await api('/terminals', { method:'POST',body:{endpointId:enrolled.endpointId,idempotencyKey:randomUUID()} });
   const command = text => api(`/terminals/${terminal.id}/commands`, {method:'POST',body:{command:text,idempotencyKey:randomUUID(),timeoutSeconds:60}});

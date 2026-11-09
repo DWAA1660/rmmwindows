@@ -186,14 +186,16 @@ async function api<T>(
   method = "GET",
   body?: unknown,
 ): Promise<T> {
+  // A Blob (file upload chunk) is sent as raw bytes; everything else as JSON.
+  const raw = body instanceof Blob;
   const response = await fetch(`/api${path}`, {
     method,
     credentials: "same-origin",
     headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(body !== undefined ? { "Content-Type": raw ? "application/octet-stream" : "application/json" } : {}),
       ...(method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
   });
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
