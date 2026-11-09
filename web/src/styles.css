@@ -3675,6 +3675,7 @@ td:last-child {
 .fx-failures ul { margin:6px 0;padding-left:18px;max-height:160px;overflow:auto; }
 .fx-failures li { margin:3px 0;overflow-wrap:anywhere; }
 .fx-failures code { font-size:11px; }
+.fx-failures.fx-warning { border-color:#ecdcb8;background:#fbf3e4;color:#7a581c; }
 .fx-failure-actions,.fx-dialog-actions { display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end; }
 .fx-dialog { border:1px solid #dce4e6;background:#f8fbfb;border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:12px; }
 .fx-dialog p { margin:0;color:#6b7a78; }

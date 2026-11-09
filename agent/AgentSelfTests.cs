@@ -41,6 +41,7 @@ internal static class AgentSelfTests
             ("file explorer recursive delete removes links without following them", FileOperationsLinkDeleteAsync),
             ("file explorer refuses protected, unsafe and secret paths", FileOperationsSafetyAsync),
             ("file explorer download sends exact bytes in chunks with SHA-256", FileOperationsDownloadAsync),
+            ("file explorer folder download sends a complete zip and reports what was left out", FileOperationsFolderDownloadAsync),
             ("VT screen updates convert to plain text with CR progress", ConsoleRelayTests.ConverterAsync),
             ("relay command line round-trips arguments and searches PATH only", ConsoleRelayTests.CommandLineQuotingAsync),
             ("pipe-buffering child run directly shows progress only at exit", ConsoleRelayTests.DirectBufferedProgressAsync),
@@ -507,9 +508,9 @@ internal static class AgentSelfTests
         protectedRoots: [Path.Combine(root, "protected-root")],
         secretTrees: [Path.Combine(root, "agent-data")]);
 
-    private static async Task<JsonElement> RunFiles(object payload, FileSafetyPolicy policy, IFileTransfer? transfer = null)
+    private static async Task<JsonElement> RunFiles(object payload, FileSafetyPolicy policy, IFileTransfer? transfer = null, string? staging = null)
     {
-        var outcome = await FileOperations.ExecuteAsync(JsonSerializer.SerializeToElement(payload, AgentConfiguration.Json), policy, transfer, CancellationToken.None);
+        var outcome = await FileOperations.ExecuteAsync(JsonSerializer.SerializeToElement(payload, AgentConfiguration.Json), policy, transfer, CancellationToken.None, staging);
         var json = JsonDocument.Parse(outcome.Json).RootElement.Clone();
         Assert(json.GetProperty("ok").GetBoolean() == (outcome.Status == "succeeded"), "Outcome status and JSON disagree.");
         return json;
@@ -705,9 +706,89 @@ internal static class AgentSelfTests
             var emptyTransfer = new MemoryTransfer();
             Assert((await RunFiles(new { action = "download", path = empty }, TempPolicy(root), emptyTransfer)).GetProperty("ok").GetBoolean()
                 && emptyTransfer.Chunks.Count == 0 && emptyTransfer.Finished?.Size == 0, "Empty file download failed.");
-            Assert(!(await RunFiles(new { action = "download", path = root }, TempPolicy(root), new MemoryTransfer())).GetProperty("ok").GetBoolean(), "A folder was downloaded.");
         }
         finally { ForceDelete(root); }
+    }
+
+    private static async Task FileOperationsFolderDownloadAsync()
+    {
+        var root = CreateTemp();
+        try
+        {
+            var policy = TempPolicy(root);
+            var staging = Path.Combine(root, "agent-data", "download-staging");
+            var folder = Path.Combine(root, "Reports αβ");
+            Directory.CreateDirectory(Path.Combine(folder, "2026", "empty"));
+            var big = new byte[FileOperations.TransferChunkBytes * 3 + 999];
+            new Random(11).NextBytes(big);
+            File.WriteAllBytes(Path.Combine(folder, "2026", "random.bin"), big);
+            File.WriteAllText(Path.Combine(folder, "notes ü.txt"), "hello zip");
+            File.WriteAllText(Path.Combine(folder, "locked.txt"), "in use");
+            File.SetAttributes(Path.Combine(folder, "notes ü.txt"), FileAttributes.ReadOnly | FileAttributes.Hidden);
+            // A nested agent data tree must never be included.
+            var nestedSecret = Path.Combine(folder, "agent-data-elsewhere");
+            var secretPolicy = new FileSafetyPolicy([], [], [Path.Combine(root, "agent-data"), nestedSecret]);
+            Directory.CreateDirectory(nestedSecret);
+            File.WriteAllText(Path.Combine(nestedSecret, "agent.json"), "{\"agentToken\":\"secret\"}");
+            var outside = Path.Combine(root, "outside");
+            Directory.CreateDirectory(outside);
+            File.WriteAllText(Path.Combine(outside, "not-mine.txt"), "must not be followed");
+            var linked = TryCreateDirectoryLink(Path.Combine(folder, "link"), outside);
+
+            var transfer = new MemoryTransfer();
+            JsonElement result;
+            // An exclusively opened file cannot be read; it is left out and listed, not a failure.
+            using (new FileStream(Path.Combine(folder, "locked.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                var outcome = await FileOperations.ExecuteAsync(JsonSerializer.SerializeToElement(new { action = "download", path = folder }, AgentConfiguration.Json),
+                    secretPolicy, transfer, CancellationToken.None, staging);
+                Assert(outcome.Status == "succeeded", $"Folder download failed: {outcome.Summary}");
+                result = JsonDocument.Parse(outcome.Json).RootElement.Clone();
+            }
+            var bytes = transfer.Chunks.OrderBy(chunk => chunk.Sequence).SelectMany(chunk => chunk.Data).ToArray();
+            Assert(transfer.Chunks.Select(chunk => chunk.Sequence).SequenceEqual(Enumerable.Range(0, transfer.Chunks.Count).Select(index => (long)index)), "Zip chunks were not sent in sequence.");
+            Assert(transfer.Finished is { } finished && finished.Name == "Reports αβ.zip" && finished.Size == bytes.Length
+                && finished.Sha256 == Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)), "Zip name, size or SHA-256 is wrong.");
+            Assert(result.GetProperty("archive").GetBoolean() && result.GetProperty("files").GetInt32() == 2 && result.GetProperty("name").GetString() == "Reports αβ.zip", "Folder result is wrong.");
+
+            using (var zip = new System.IO.Compression.ZipArchive(new MemoryStream(bytes), System.IO.Compression.ZipArchiveMode.Read))
+            {
+                var names = zip.Entries.Select(entry => entry.FullName).ToHashSet();
+                foreach (var expected in new[] { "Reports αβ/", "Reports αβ/2026/", "Reports αβ/2026/empty/", "Reports αβ/2026/random.bin", "Reports αβ/notes ü.txt" })
+                    Assert(names.Contains(expected), $"Zip is missing {expected}.");
+                Assert(!names.Any(name => name.Contains("agent-data-elsewhere") || name.Contains("link") || name.Contains("locked") || name.Contains("not-mine")),
+                    $"Zip contains an excluded item: {string.Join(", ", names)}");
+                using var memory = new MemoryStream();
+                using (var stream = zip.GetEntry("Reports αβ/2026/random.bin")!.Open()) stream.CopyTo(memory);
+                Assert(memory.ToArray().SequenceEqual(big), "Zipped file content differs.");
+                using var reader = new StreamReader(zip.GetEntry("Reports αβ/notes ü.txt")!.Open());
+                Assert(reader.ReadToEnd() == "hello zip", "Zipped text differs.");
+            }
+            var skipped = result.GetProperty("skipped").EnumerateArray().Select(item => item.GetProperty("path").GetString()!).ToArray();
+            Assert(skipped.Contains(Path.Combine(folder, "locked.txt")) && skipped.Contains(nestedSecret) && (!linked || skipped.Contains(Path.Combine(folder, "link")))
+                && result.GetProperty("skippedCount").GetInt32() == skipped.Length, $"Left-out items were not all reported: {string.Join(", ", skipped)}");
+            Assert(!Directory.EnumerateFiles(staging).Any(), "The temporary zip was not removed.");
+
+            // Refusals: drive roots, links, the agent data tree itself.
+            Assert(!(await RunFiles(new { action = "download", path = Path.GetPathRoot(root)! }, policy, new MemoryTransfer())).GetProperty("ok").GetBoolean(), "A whole drive was downloadable.");
+            Assert(!(await RunFiles(new { action = "download", path = Path.Combine(root, "agent-data") }, policy, new MemoryTransfer())).GetProperty("ok").GetBoolean(), "The agent data folder was downloadable.");
+            if (linked) Assert(!(await RunFiles(new { action = "download", path = Path.Combine(folder, "link") }, policy, new MemoryTransfer())).GetProperty("ok").GetBoolean(), "A folder link was followed.");
+            Assert(FileOperations.ArchiveName(new string('x', 255)).Length == 255 && FileOperations.ArchiveName("a.") == "a.zip", "Archive names are not bounded.");
+
+            // An empty folder still produces a valid zip with just its own entry.
+            Directory.CreateDirectory(Path.Combine(root, "nothing"));
+            var emptyTransfer = new MemoryTransfer();
+            var empty = await RunFiles(new { action = "download", path = Path.Combine(root, "nothing") }, policy, emptyTransfer, staging);
+            using var emptyZip = new System.IO.Compression.ZipArchive(new MemoryStream(emptyTransfer.Chunks.SelectMany(chunk => chunk.Data).ToArray()));
+            Assert(empty.GetProperty("ok").GetBoolean() && emptyZip.Entries.Single().FullName == "nothing/", "Empty folder zip is wrong.");
+        }
+        finally
+        {
+            // Remove the link entry itself first so cleanup never walks into its target.
+            var link = Path.Combine(root, "Reports αβ", "link");
+            if (Directory.Exists(link)) Directory.Delete(link, recursive: false);
+            ForceDelete(root);
+        }
     }
 
     private static void ForceDelete(string root)

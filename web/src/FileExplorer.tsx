@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowUp, Calculator, ChevronRight, ClipboardPaste, Copy, Download, Eye, EyeOff, File, Folder, FolderPlus,
+  ArrowUp, Calculator, ChevronRight, ClipboardPaste, Copy, Download, Eye, EyeOff, File, FileArchive, Folder, FolderPlus,
   HardDrive, Link2, Loader2, Monitor, Pencil, RefreshCw, Scissors, Trash2, TriangleAlert, X,
 } from 'lucide-react';
-import { joinPath, parentPath, crumbs, typeLabel, formatBytes } from './fileExplorerModel';
+import { joinPath, parentPath, crumbs, typeLabel, formatBytes, downloadErrorText, leftOutItems, type DownloadResult } from './fileExplorerModel';
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type JobInfo = { id: string; status: string; summary?: string | null };
@@ -70,7 +70,7 @@ export function FileExplorer({ endpoint, request, canWrite }: {
   const [sizes, setSizes] = useState<Record<string, { bytes: number | null; partial: boolean }>>({});
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [failures, setFailures] = useState<{ title: string; items: ItemResult[]; retry?: () => void } | null>(null);
+  const [failures, setFailures] = useState<{ title: string; items: ItemResult[]; retry?: () => void; tone?: 'warning' } | null>(null);
   const [dialog, setDialog] = useState<null | { kind: 'delete' } | { kind: 'rename'; entry: FileEntry } | { kind: 'mkdir' }>(null);
   const [nameInput, setNameInput] = useState('');
   const [recursive, setRecursive] = useState(true);
@@ -176,26 +176,40 @@ export function FileExplorer({ endpoint, request, canWrite }: {
     }
   };
 
+  /** Downloads each selected item; the agent compresses folders into one .zip each before sending them. */
   const downloadSelected = async () => {
-    const files = selectedEntries.filter(entry => entry.type === 'file');
+    const items = selectedEntries;
     setError(''); setNotice(''); setFailures(null);
     const problems: ItemResult[] = [];
-    for (const [index, file] of files.entries()) {
-      setOpActivity({ label: `Fetching ${file.name}${files.length > 1 ? ` (${index + 1} of ${files.length})` : ''}`, since: Date.now() });
+    const leftOut: ItemResult[] = [];
+    const saved: string[] = [];
+    for (const [index, item] of items.entries()) {
+      const isFolder = item.type === 'directory';
+      const position = items.length > 1 ? ` (${index + 1} of ${items.length})` : '';
+      setOpActivity({ label: isFolder ? `Compressing ${item.name} into a .zip and fetching it${position}` : `Fetching ${item.name}${position}`, since: Date.now() });
       try {
-        const { job, result } = await runJob<Outcome & { name?: string; size?: number }>(request, endpoint.id, 'files', { action: 'download', path: file.path }, 3600,
+        const { job, result } = await runJob<DownloadResult>(request, endpoint.id, 'files', { action: 'download', path: item.path }, 3600,
           update => setOpActivity(activity => activity && { ...activity, jobId: update.id, status: update.status }));
-        if (!result?.ok) throw new Error(result?.error || failureText(job, 'The file could not be fetched.'));
+        if (!result?.ok) throw new Error(downloadErrorText(result?.error || failureText(job, `${item.name} could not be fetched.`), isFolder));
         // The browser saves it from the attachment response; the page stays here.
+        const name = result.name || (isFolder ? `${item.name}.zip` : item.name);
         const link = document.createElement('a');
         link.href = `/api/jobs/${job.id}/file`;
-        link.download = file.name;
+        link.download = name;
         document.body.appendChild(link); link.click(); link.remove();
-      } catch (e) { problems.push({ path: file.path, ok: false, error: (e as Error).message }); }
+        saved.push(name);
+        if (result.archive) leftOut.push(...leftOutItems(result));
+      } catch (e) { problems.push({ path: item.path, ok: false, error: (e as Error).message }); }
     }
     setOpActivity(null);
-    if (problems.length) setFailures({ title: `${files.length - problems.length} downloaded, ${problems.length} failed`, items: problems });
-    else setNotice(files.length === 1 ? `${files[0].name} is downloading in your browser.` : `${files.length} files are downloading in your browser.`);
+    const leftOutTitle = `${leftOut.length.toLocaleString()} item(s) could not be included in the zip`;
+    if (problems.length) {
+      setFailures({ title: [`${saved.length} downloaded`, `${problems.length} failed`, ...(leftOut.length ? [leftOutTitle] : [])].join(', '), items: [...problems, ...leftOut] });
+      return;
+    }
+    setNotice(saved.length === 1 ? `${saved[0]} is downloading in your browser.` : `${saved.length} downloads started in your browser: ${saved.join(', ')}.`);
+    // The download succeeded; what was left out (in use, links, agent data) is a warning, not a failure.
+    if (leftOut.length) setFailures({ title: leftOutTitle, items: leftOut, tone: 'warning' });
   };
 
   const paste = (overwrite = false, paths = clipboard?.paths || []) => {
@@ -263,7 +277,7 @@ export function FileExplorer({ endpoint, request, canWrite }: {
   const waitingSeconds = activity ? Math.floor((now - activity.since) / 1000) : 0;
   const atRoot = !listing || listing.path === '';
   const hasFolderSelected = selectedEntries.some(entry => entry.type === 'directory');
-  const files = selectedEntries.filter(entry => entry.type === 'file');
+  const onlyFolders = hasFolderSelected && selectedEntries.every(entry => entry.type === 'directory');
 
   return (
     <div className="fx">
@@ -293,7 +307,11 @@ export function FileExplorer({ endpoint, request, canWrite }: {
 
       {!atRoot && (
         <div className="fx-toolbar" role="toolbar" aria-label="File actions">
-          <button className="button secondary small" disabled={busy || !files.length || hasFolderSelected} title={hasFolderSelected ? 'Folders cannot be downloaded; select files only' : 'Download the selected files'} onClick={() => void downloadSelected()}><Download size={14} /> Download</button>
+          <button className="button secondary small" disabled={busy || !selected.size}
+            title={hasFolderSelected ? 'Download the selected items; each folder is compressed into its own .zip on the computer first (up to 1 GiB per download)' : 'Download the selected files'}
+            onClick={() => void downloadSelected()}>
+            {onlyFolders ? <FileArchive size={14} /> : <Download size={14} />} {onlyFolders ? 'Download as .zip' : 'Download'}
+          </button>
           <button className="button secondary small" disabled={busy || !selected.size} onClick={() => { setClipboard({ mode: 'copy', paths: selectedEntries.map(entry => entry.path), from: currentPath }); setNotice(`${selected.size} item(s) copied. Open a folder and choose Paste.`); }}><Copy size={14} /> Copy</button>
           <button className="button secondary small" disabled={busy || !selected.size} onClick={() => { setClipboard({ mode: 'cut', paths: selectedEntries.map(entry => entry.path), from: currentPath }); setNotice(`${selected.size} item(s) cut. Open a folder and choose Paste to move them.`); }}><Scissors size={14} /> Cut</button>
           <button className="button secondary small" disabled={busy || !clipboard} title={clipboard ? `${clipboard.mode === 'cut' ? 'Move' : 'Copy'} ${clipboard.paths.length} item(s) here` : 'Copy or cut items first'} onClick={() => paste()}>
@@ -327,7 +345,7 @@ export function FileExplorer({ endpoint, request, canWrite }: {
       {error && <p className="form-error fx-message" role="alert">{error}</p>}
       {notice && !error && <p className="fx-notice fx-message">{notice}</p>}
       {failures && (
-        <div className="fx-failures" role="alert">
+        <div className={`fx-failures${failures.tone === 'warning' ? ' fx-warning' : ''}`} role={failures.tone === 'warning' ? 'status' : 'alert'}>
           <strong>{failures.title}</strong>
           <ul>{failures.items.slice(0, 50).map(item => <li key={item.path}><code>{item.path}</code> — {item.error}</li>)}</ul>
           {failures.items.length > 50 && <p>…and {failures.items.length - 50} more. The job's full output lists every item.</p>}

@@ -190,6 +190,34 @@ try {
   assert.equal(file.headers.get('x-content-sha256'), fetched.result.sha256);
   console.log(`PASS file explorer: list (picked up in ${listed.pickedUpMs} ms), drives, copy, mkdir, per-item delete, protected refusal, ${payloadBytes.length}-byte download identical.`);
 
+  // Folder download: the agent zips the folder and sends the zip through the same transfer.
+  phase('File explorer: download a folder as a zip and compare every extracted file.');
+  const zipSource = join(sample, 'Zip Me ü');
+  await mkdir(join(zipSource, 'nested', 'empty'), { recursive: true });
+  const nestedBytes = randomBytes(3 * 1024 * 1024 + 77);
+  await writeFile(join(zipSource, 'nested', 'data.bin'), nestedBytes);
+  await writeFile(join(zipSource, 'readme.txt'), 'folder download ✓');
+  const zipped = await runFiles({ action: 'download', path: zipSource }, 600);
+  assert.equal(zipped.job.status, 'succeeded', zipped.job.summary);
+  assert.equal(zipped.result.archive, true);
+  assert.equal(zipped.result.name, 'Zip Me ü.zip');
+  assert.equal(zipped.result.files, 2);
+  assert.equal(zipped.result.skippedCount, 0);
+  const zipResponse = await fetch(base + `/api/jobs/${zipped.job.id}/file`, { headers: { Cookie: cookie }, signal: AbortSignal.timeout(30000) });
+  assert.equal(zipResponse.status, 200);
+  assert.match(zipResponse.headers.get('content-disposition'), /filename\*=UTF-8''Zip%20Me%20%C3%BC\.zip/);
+  const zipPath = join(temp, 'received.zip');
+  await writeFile(zipPath, Buffer.from(await zipResponse.arrayBuffer()));
+  const extracted = join(temp, 'extracted');
+  const expand = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:RMM_ZIP -DestinationPath $env:RMM_OUT'],
+    { encoding: 'utf8', env: { ...process.env, RMM_ZIP: zipPath, RMM_OUT: extracted } });
+  assert.equal(expand.status, 0, expand.stderr);
+  assert.deepEqual(await readFile(join(extracted, 'Zip Me ü', 'nested', 'data.bin')), nestedBytes);
+  assert.equal(await readFile(join(extracted, 'Zip Me ü', 'readme.txt'), 'utf8'), 'folder download ✓');
+  assert.ok(existsSync(join(extracted, 'Zip Me ü', 'nested', 'empty')), 'empty folders are kept');
+  assert.ok(!existsSync(join(agentDir, 'download-staging')) || (await import('node:fs')).readdirSync(join(agentDir, 'download-staging')).length === 0, 'the temporary zip was removed from the endpoint');
+  console.log(`PASS folder download: ${zipped.result.size}-byte zip, every extracted file identical, empty folder kept, staging cleaned.`);
+
   phase('Persistent terminal: state across separate authorized jobs, then explicit close while running.');
   const terminal = await api('/terminals', { method:'POST',body:{endpointId:enrolled.endpointId,idempotencyKey:randomUUID()} });
   const command = text => api(`/terminals/${terminal.id}/commands`, {method:'POST',body:{command:text,idempotencyKey:randomUUID(),timeoutSeconds:60}});

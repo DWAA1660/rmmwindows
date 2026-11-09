@@ -43,3 +43,25 @@ export function formatBytes(value?: number | null): string {
   while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
   return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
 }
+
+/** What the agent reports for a finished `download` job (folders arrive as one zip, agent 0.1.13+). */
+export type DownloadResult = {
+  ok: boolean; error?: string; name?: string; size?: number; archive?: boolean; files?: number; folders?: number;
+  skippedCount?: number; skipped?: { path: string; error: string }[]; skippedListTruncated?: boolean;
+};
+
+/** Agents before 0.1.13 refuse folders with this text; tell the operator how to fix it. */
+export function downloadErrorText(error: string, isFolder: boolean): string {
+  return isFolder && /folders cannot be downloaded/i.test(error)
+    ? 'This computer runs an older agent that cannot zip folders. Update its agent (0.1.13 or newer) and try again.'
+    : error;
+}
+
+/** Items a folder zip left out (in use, links, agent data), including an explicit line when the list was cut short. */
+export function leftOutItems(result: DownloadResult): { path: string; ok: false; error: string }[] {
+  const listed = (result.skipped || []).map(item => ({ path: item.path, ok: false as const, error: item.error }));
+  const unlisted = (result.skippedCount ?? listed.length) - listed.length;
+  if (result.skippedListTruncated && unlisted > 0)
+    listed.push({ path: `${result.name ?? 'zip'}: ${unlisted.toLocaleString('en-US')} more`, ok: false, error: 'Not listed here; open the job output for the full result.' });
+  return listed;
+}
