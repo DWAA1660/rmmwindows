@@ -50,16 +50,17 @@ export type DownloadResult = {
   skippedCount?: number; skipped?: { path: string; error: string }[]; skippedListTruncated?: boolean;
 };
 
-/** Agents before 0.1.13 cannot zip folders, upload or extract; tell the operator how to fix it. */
+/** Agents before 0.1.13 cannot zip folders; tell the operator how to fix it. */
 export function downloadErrorText(error: string, isFolder: boolean): string {
   if (isFolder && /folders cannot be downloaded/i.test(error))
-    return 'This computer runs an older agent that cannot zip folders. Update its agent (0.1.13 or newer) and try again.';
+    return 'This computer runs an older agent that cannot zip folders. Update its agent (0.1.14 or newer) and try again.';
   return agentErrorText(error);
 }
 
+/** Upload and extract need agent 0.1.14 (an early 0.1.13 build had folder zips only). */
 export function agentErrorText(error: string): string {
   return /unsupported file action/i.test(error)
-    ? 'This computer runs an older agent that cannot do this yet. Update its agent (0.1.13 or newer) and try again.'
+    ? 'This computer runs an older agent that cannot do this yet. Update its agent (0.1.14 or newer) and try again.'
     : error;
 }
 
