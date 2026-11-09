@@ -120,6 +120,20 @@ export function openDatabase(filename) {
     if (!groupColumns.has('auto_update')) db.exec('ALTER TABLE endpoint_groups ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 1');
     db.exec('PRAGMA user_version=10;');
   });
+  // v11: files uploaded from the console to send to endpoints. Bytes live on disk under
+  // <files>/uploads keyed by UUID (never by the uploaded name); rows bound size, owner and expiry.
+  // file_upload_jobs links an upload to the jobs that deliver it so it can be freed once they finish.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS file_uploads (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_by TEXT NOT NULL,
+        name TEXT NOT NULL, size_bytes INTEGER NOT NULL, received_bytes INTEGER NOT NULL DEFAULT 0, next_sequence INTEGER NOT NULL DEFAULT 0,
+        sha256 TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);
+      CREATE INDEX IF NOT EXISTS file_uploads_status ON file_uploads(status, created_at);
+      CREATE TABLE IF NOT EXISTS file_upload_chunks (upload_id TEXT NOT NULL REFERENCES file_uploads(id), sequence INTEGER NOT NULL,
+        length INTEGER NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(upload_id, sequence));
+      CREATE TABLE IF NOT EXISTS file_upload_jobs (upload_id TEXT NOT NULL REFERENCES file_uploads(id), job_id TEXT NOT NULL REFERENCES jobs(id),
+        PRIMARY KEY(upload_id, job_id));
+      PRAGMA user_version=11;`);
+  });
   return db;
 }
 

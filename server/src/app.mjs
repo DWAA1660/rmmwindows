@@ -170,8 +170,9 @@ export function createApp(options = {}) {
   });
   app.use(express.json({ limit: '2mb', strict: true }));
   const downloads = mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
-  // Agent file-download chunks are the only raw (non-JSON) bodies; their route parses them itself.
-  const rawFileChunk = req => req.method === 'PUT' && /^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) && req.is('application/octet-stream');
+  // Agent file-download chunks and console upload chunks are the only raw (non-JSON) bodies; their
+  // routes parse them themselves, after authentication (and CSRF for the console).
+  const rawFileChunk = req => req.method === 'PUT' && (/^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) || /^\/uploads\/[^/]+\/chunks\/\d+$/.test(req.path)) && req.is('application/octet-stream');
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
   const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
   const updateHealth = mountUpdateHealth({ db, audit, fail, str });
@@ -215,7 +216,7 @@ export function createApp(options = {}) {
     for (const id of ids) if (!db.prepare('SELECT id FROM endpoints WHERE id=? AND revoked=0').get(id)) fail(400, `Endpoint ${id} is unavailable or revoked.`);
     return ids;
   }
-  function validatePayload(kind, payload) {
+  function validatePayload(kind, payload, operatorSession) {
     if (!object(payload)) fail(400, 'payload must be an object.');
     if (kind === 'powershell') return { script: str(payload.script, 'script', { max: 262144 }) };
     if (kind === 'reboot') return { delaySeconds: integer(payload.delaySeconds, 'delaySeconds', 30, 3600, 30), reason: str(payload.reason, 'reason', { min: 0, max: 200, fallback: 'Library IT maintenance' }) };
@@ -225,7 +226,7 @@ export function createApp(options = {}) {
       if (!/^[a-zA-Z]:\\/.test(path) || path.includes('\0')) fail(400, 'Storage path must be an absolute local Windows path such as C:\\Users.');
       return { path };
     }
-    if (kind === 'files') return validateFilesPayload(payload, { fail, str });
+    if (kind === 'files') return validateFilesPayload(payload, { fail, str, resolveUpload: operatorSession ? id => files.resolveUpload(id, operatorSession) : null });
     fail(400, 'Unsupported job kind.');
   }
   // Long-poll claims wait on this per-endpoint signal (plus a periodic re-check as a safety net).
@@ -489,7 +490,7 @@ export function createApp(options = {}) {
   });
   admin.post('/jobs', (req, res) => {
     const ids = endpointIds(req.body.endpointIds); const kind = req.body.kind;
-    const payload = validatePayload(kind, req.body.payload || {});
+    const payload = validatePayload(kind, req.body.payload || {}, req.operator);
     const timeoutSeconds = integer(req.body.timeoutSeconds, 'timeoutSeconds', 10, 86400, 900);
     const idempotencyKey = req.body.idempotencyKey === undefined ? null : str(req.body.idempotencyKey, 'idempotencyKey', { max: 128 });
     const runName = str(req.body.runName,'runName',{max:150,fallback:kind});
@@ -511,6 +512,7 @@ export function createApp(options = {}) {
       audit(req.operator.username, 'jobs.created', null, { jobIds: jobs.map(job => job.id), kind, endpointIds: ids });
       // File explorer operations get their own audit entry with the exact paths involved.
       if (kind === 'files') audit(req.operator.username, `files.${payload.action}`, jobs.length === 1 ? jobs[0].id : null, { jobIds: jobs.map(job => job.id), endpointIds: ids, ...payload });
+      if (kind === 'files' && payload.action === 'upload') files.linkUploadJobs(payload.uploadId, jobs.map(job => job.id));
       return { jobs, runId, duplicate: false };
     }); res.status(result.duplicate ? 200 : 201).json(result);
   });

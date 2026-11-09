@@ -1,14 +1,19 @@
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 
 namespace LibraryRmm.Agent;
 
-/// <summary>Uploads the bytes of one downloaded file to the server for the current job.</summary>
+/// <summary>Moves file bytes between this computer and the server for the current job.</summary>
 public interface IFileTransfer
 {
+    /// <summary>Download job: sends one chunk of the file to the server.</summary>
     Task UploadChunkAsync(long sequence, ReadOnlyMemory<byte> data, CancellationToken ct);
     Task FinishAsync(string name, long sizeBytes, string sha256, long chunks, CancellationToken ct);
+    /// <summary>Upload job: reads bytes of the file an operator uploaded, starting at <paramref name="offset"/>.</summary>
+    Task<int> ReadUploadAsync(long offset, Memory<byte> buffer, CancellationToken ct);
 }
 
 /// <summary>Outcome of one <c>files</c> job: the JSON document written to stdout plus the job status.</summary>
@@ -28,8 +33,17 @@ public sealed class FileSafetyPolicy
 
     public FileSafetyPolicy(IEnumerable<string> protectedTrees, IEnumerable<string> protectedRoots, IEnumerable<string> secretTrees)
     {
+        // Each folder is kept as written and, when it exists, as its real final path, so checks on a
+        // resolved destination (junctions, 8.3 short names) still recognise it.
         static string[] Normalize(IEnumerable<string> paths) => paths.Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            .Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
+            .SelectMany(path => new[] { path, RealOrNull(path) }).OfType<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        static string? RealOrNull(string path)
+        {
+            try { return Directory.Exists(path) || File.Exists(path) ? NativePaths.FinalPath(path) : null; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
+        }
         this.protectedTrees = Normalize(protectedTrees);
         this.protectedRoots = Normalize(protectedRoots);
         this.secretTrees = Normalize(secretTrees);
@@ -128,13 +142,21 @@ public static class FileOperations
                 "rename" => Mutation(action, [Rename(String(payload, "path"), String(payload, "newName"), policy)]),
                 "mkdir" => Mutation(action, [MakeDirectory(String(payload, "path"), policy)]),
                 "download" => await DownloadAsync(String(payload, "path"), policy, transfer ?? throw new InvalidOperationException("File transfer is unavailable."), stagingDirectory, ct),
+                "upload" => await ReceiveUploadAsync(payload, policy, transfer ?? throw new InvalidOperationException("File transfer is unavailable."), ct),
+                "extract" => Extract(payload, policy, ct),
                 _ => Failure(action, "Unsupported file action; nothing was changed.")
             };
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (AgentApiException exception) when (action == "upload" && exception.StatusCode == 410)
+        {
+            return Failure(action, "The uploaded file is no longer on the server (it expired or was removed). Nothing was saved; upload it again.");
+        }
         catch (Exception exception) when (exception is HttpRequestException or AgentApiException or TaskCanceledException)
         {
-            return Failure(action, $"Sending the file to the server failed ({exception.Message}). Nothing was changed on the computer; create a new download to try again.");
+            return Failure(action, action == "upload"
+                ? $"Receiving the uploaded file from the server failed ({exception.Message}). Nothing was saved on the computer; send it again to retry."
+                : $"Sending the file to the server failed ({exception.Message}). Nothing was changed on the computer; create a new download to try again.");
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException or System.Security.SecurityException or NotSupportedException)
         {
@@ -502,12 +524,253 @@ public static class FileOperations
         return new ItemResult(absolute, true);
     }
 
+    // ---------- shared checks for writing files ----------
+
+    /// <summary>
+    /// An existing folder that files may be written into: allowed by the policy both as typed and as the
+    /// real location it resolves to (junctions, symbolic links or 8.3 short names in any ancestor could
+    /// otherwise lead into a protected folder), and not itself a link.
+    /// </summary>
+    private static string ExistingDestination(string path, FileSafetyPolicy policy)
+    {
+        var destination = ValidatePath(path);
+        policy.EnsureWritableDestination(destination);
+        var info = new DirectoryInfo(destination);
+        if (!info.Exists) throw new DirectoryNotFoundException(File.Exists(destination) ? $"{destination} is a file, not a folder." : $"Destination folder not found: {destination}");
+        if (IsLink(info)) throw new IOException($"{destination} is a link (symbolic link or junction); files are never written through links.");
+        policy.EnsureWritableDestination(NativePaths.FinalPath(destination));
+        return destination;
+    }
+
+    private static void EnsureFreeSpace(string folder, long bytes, string purpose)
+    {
+        var drive = new DriveInfo(Path.GetPathRoot(folder)!);
+        var needed = bytes + StagingReserveBytes;
+        if (drive.AvailableFreeSpace < needed)
+            throw new IOException($"Not enough free space on {drive.Name} to {purpose}: {drive.AvailableFreeSpace:N0} bytes free, {needed:N0} needed (including a {StagingReserveBytes / (1024 * 1024)} MiB safety margin). Nothing was written.");
+    }
+
+    private static void DeleteQuietly(string file)
+    {
+        try { if (File.Exists(file)) { File.SetAttributes(file, FileAttributes.Normal); File.Delete(file); } }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
+
+    // ---------- upload (console -> this computer) ----------
+
+    /// <summary>
+    /// Saves a file an operator uploaded. Name, size and SHA-256 come from the server's record, not the
+    /// browser. Bytes go to a hidden temporary file in the destination folder and are moved into place
+    /// only after size and SHA-256 match, so a failed or partial transfer never leaves a damaged file.
+    /// </summary>
+    private static async Task<FileJobOutcome> ReceiveUploadAsync(JsonElement payload, FileSafetyPolicy policy, IFileTransfer transfer, CancellationToken ct)
+    {
+        var name = ValidateName(String(payload, "name"));
+        var size = payload.TryGetProperty("sizeBytes", out var sizeValue) && sizeValue.ValueKind == JsonValueKind.Number && sizeValue.TryGetInt64(out var parsed) && parsed is >= 0 and <= MaxDownloadBytes
+            ? parsed : throw new ArgumentException($"The upload size is missing or above {MaxDownloadBytes:N0} bytes.");
+        var expectedSha256 = String(payload, "sha256");
+        if (expectedSha256.Length != 64 || !expectedSha256.All(Uri.IsHexDigit)) throw new ArgumentException("The upload SHA-256 is missing.");
+        var destination = ExistingDestination(String(payload, "destinationDirectory"), policy);
+        var overwrite = Bool(payload, "overwrite");
+        var target = Path.Combine(destination, name);
+        var existing = Existing(target);
+        if (existing is DirectoryInfo) throw new IOException($"A folder named {target} already exists.");
+        if (existing is not null)
+        {
+            if (!overwrite) throw new IOException($"{target} already exists.");
+            if (IsLink(existing)) throw new IOException($"{target} is a link; links are never replaced by an upload.");
+            policy.EnsureMutable(target);
+        }
+        EnsureFreeSpace(destination, size, "save the upload");
+
+        var partial = Path.Combine(destination, $".rmm-upload-{Guid.NewGuid():N}.partial");
+        try
+        {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[TransferChunkBytes];
+            long received = 0;
+            await using (var output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous))
+            {
+                try { File.SetAttributes(partial, FileAttributes.Hidden); } catch (IOException) { /* cosmetic only */ }
+                while (received < size)
+                {
+                    var wanted = (int)Math.Min(buffer.Length, size - received);
+                    var read = await transfer.ReadUploadAsync(received, buffer.AsMemory(0, wanted), ct);
+                    if (read <= 0) throw new InvalidDataException("The server ended the upload early. Nothing was saved.");
+                    hash.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), ct);
+                    received += read;
+                }
+            }
+            var sha256 = Convert.ToHexStringLower(hash.GetHashAndReset());
+            if (!string.Equals(sha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The received bytes do not match the SHA-256 the server recorded. Nothing was saved.");
+            File.SetAttributes(partial, FileAttributes.Normal);
+            if (existing is FileInfo old) ClearReadOnly(old);
+            File.Move(partial, target, overwrite);
+            var json = JsonSerializer.Serialize(new { action = "upload", ok = true, path = target, name, size = received, sha256, replaced = existing is not null }, AgentConfiguration.Json);
+            return new(json, "succeeded", 0, $"{(existing is null ? "Saved" : "Replaced")} {target} ({received:N0} bytes, SHA-256 {sha256[..12]}… verified).");
+        }
+        finally { DeleteQuietly(partial); }
+    }
+
+    // ---------- extract a zip on this computer ----------
+
+    public const long MaxExtractBytes = 16L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Extracts a zip into a folder (created if needed). Every entry must stay inside the destination
+    /// ("zip slip" entries with .., drive letters, absolute paths, streams or reserved names are refused),
+    /// nothing is written through links, protected folders stay protected, and the declared sizes are
+    /// enforced while decompressing so a zip bomb cannot fill the disk. Each file is written to a
+    /// temporary name and moved into place only when complete. Per-entry problems are reported and the
+    /// rest is still extracted.
+    /// </summary>
+    private static FileJobOutcome Extract(JsonElement payload, FileSafetyPolicy policy, CancellationToken ct)
+    {
+        var source = ValidatePath(String(payload, "path"));
+        policy.EnsureReadable(source);
+        var sourceInfo = new FileInfo(source);
+        if (!sourceInfo.Exists) throw new FileNotFoundException(Directory.Exists(source) ? $"{source} is a folder, not a zip file." : $"File not found: {source}");
+        if (IsLink(sourceInfo)) throw new IOException($"{source} is a link; links are never followed.");
+        policy.EnsureReadable(NativePaths.FinalPath(source));
+        var overwrite = Bool(payload, "overwrite");
+
+        var destination = ValidatePath(String(payload, "destinationDirectory"));
+        policy.EnsureWritableDestination(destination);
+        var createdDestination = false;
+        if (!Directory.Exists(destination))
+        {
+            if (Existing(destination) is not null) throw new IOException($"{destination} exists and is not a folder.");
+            ValidateName(Path.GetFileName(destination));
+            ExistingDestination(ParentOf(destination), policy);
+            policy.EnsureMutable(destination);
+        }
+        else ExistingDestination(destination, policy);
+
+        using var archive = ZipFile.OpenRead(source);
+        var entries = archive.Entries;
+        if (entries.Count > MaxArchiveEntries) throw new IOException($"The zip holds {entries.Count:N0} entries; at most {MaxArchiveEntries:N0} can be extracted. Nothing was extracted.");
+        long declared = 0;
+        foreach (var entry in entries) declared += entry.Length;
+        if (declared > MaxExtractBytes) throw new IOException($"The zip would expand to {declared:N0} bytes; at most {MaxExtractBytes:N0} can be extracted. Nothing was extracted.");
+        EnsureFreeSpace(Directory.Exists(destination) ? destination : ParentOf(destination), declared, "extract the zip");
+        if (!Directory.Exists(destination)) { Directory.CreateDirectory(destination); createdDestination = true; }
+
+        var failures = new List<ItemResult>();
+        int files = 0, folders = 0;
+        long written = 0;
+        var buffer = new byte[1024 * 1024];
+        foreach (var entry in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            var target = entry.FullName;
+            try
+            {
+                target = EntryTarget(destination, entry.FullName);
+                var isDirectory = entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\');
+                var folder = isDirectory ? target : Path.GetDirectoryName(target)!;
+                EnsureFolderChain(destination, folder, policy);
+                if (isDirectory) { folders++; continue; }
+                var existing = Existing(target);
+                if (existing is DirectoryInfo) throw new IOException("A folder with this name already exists.");
+                if (existing is not null)
+                {
+                    if (!overwrite) throw new IOException($"{target} already exists.");
+                    if (IsLink(existing)) throw new IOException("It is a link; links are never replaced.");
+                    policy.EnsureMutable(target);
+                }
+                var partial = Path.Combine(folder, $".rmm-extract-{Guid.NewGuid():N}.partial");
+                try
+                {
+                    using (var input = entry.Open())
+                    using (var output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920))
+                    {
+                        long entryBytes = 0;
+                        uint crc = Crc32.Start;
+                        int read;
+                        while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            entryBytes += read;
+                            if (entryBytes > entry.Length) throw new InvalidDataException("It holds more data than the zip declares (possible zip bomb), so it was not extracted.");
+                            crc = Crc32.Append(crc, buffer.AsSpan(0, read));
+                            output.Write(buffer, 0, read);
+                        }
+                        if (entryBytes != entry.Length) throw new InvalidDataException("It is shorter than the zip declares (damaged zip), so it was not extracted.");
+                        // .NET stops reading at the declared size, so a lying size would otherwise give a
+                        // silently truncated file. The zip's own checksum catches that and any corruption.
+                        if (Crc32.Finish(crc) != entry.Crc32) throw new InvalidDataException("Its contents do not match the checksum stored in the zip (damaged or tampered zip), so it was not extracted.");
+                    }
+                    try { File.SetLastWriteTime(partial, entry.LastWriteTime.LocalDateTime); } catch (Exception exception) when (exception is IOException or ArgumentException) { }
+                    if (existing is FileInfo old) ClearReadOnly(old);
+                    File.Move(partial, target, overwrite);
+                    files++;
+                    written += entry.Length;
+                }
+                finally { DeleteQuietly(partial); }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or NotSupportedException)
+            {
+                failures.Add(new ItemResult(target, false, exception.Message));
+            }
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            action = "extract", ok = failures.Count == 0, path = source, destination, createdDestination,
+            files, folders, bytes = written, succeeded = files, failed = failures.Count,
+            results = failures.Take(MaxSkippedListed).Select(result => new { path = result.Path, ok = false, error = result.Error }),
+            resultsTruncated = failures.Count > MaxSkippedListed
+        }, AgentConfiguration.Json);
+        var summary = $"Extracted {files:N0} file(s) ({written:N0} bytes) and {folders:N0} folder entr{(folders == 1 ? "y" : "ies")} from {Path.GetFileName(source)} into {destination}.";
+        if (failures.Count > 0) summary += $" {failures.Count:N0} entr{(failures.Count == 1 ? "y" : "ies")} failed (first: {failures[0].Path} — {failures[0].Error}).";
+        return new(json, failures.Count == 0 ? "succeeded" : "failed", failures.Count == 0 ? 0 : 1, Limit(summary));
+    }
+
+    /// <summary>The absolute path an entry would be written to; refuses anything that is not a plain relative path inside the destination.</summary>
+    internal static string EntryTarget(string destination, string entryName)
+    {
+        var relative = entryName.Replace('/', '\\').TrimEnd('\\');
+        if (relative.Length == 0) throw new ArgumentException("The entry has no name.");
+        if (relative.StartsWith('\\') || relative.Contains(':') || Path.IsPathRooted(relative))
+            throw new ArgumentException("The entry uses an absolute path, drive letter or stream name; it was not extracted.");
+        foreach (var segment in relative.Split('\\'))
+        {
+            if (segment is "" or "." or "..") throw new ArgumentException("The entry tries to leave the destination folder (\"..\" or an empty folder name); it was not extracted.");
+            ValidateName(segment);
+        }
+        var prefix = destination.EndsWith('\\') ? destination : destination + "\\";
+        var target = Path.GetFullPath(Path.Combine(destination, relative));
+        if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("The entry would be written outside the destination folder; it was not extracted.");
+        return target;
+    }
+
+    /// <summary>Creates the folders between the destination and <paramref name="folder"/>, refusing links, files in the way and protected folders.</summary>
+    private static void EnsureFolderChain(string destination, string folder, FileSafetyPolicy policy)
+    {
+        policy.EnsureWritableDestination(folder);
+        var prefix = destination.EndsWith('\\') ? destination : destination + "\\";
+        if (!folder.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return; // the destination itself
+        var current = destination;
+        foreach (var segment in folder[prefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            var info = Existing(current);
+            if (info is null) { Directory.CreateDirectory(current); continue; }
+            if (info is not DirectoryInfo) throw new IOException($"{current} is a file, so the folder cannot be created.");
+            if (IsLink(info)) throw new IOException($"{current} is a link (symbolic link or junction); nothing is extracted through links.");
+        }
+    }
+
     // ---------- download ----------
 
     private static async Task<FileJobOutcome> DownloadAsync(string path, FileSafetyPolicy policy, IFileTransfer transfer, string? stagingDirectory, CancellationToken ct)
     {
         var absolute = ValidatePath(path);
         policy.EnsureReadable(absolute);
+        if (Existing(absolute) is { } entry && !IsLink(entry)) policy.EnsureReadable(NativePaths.FinalPath(absolute));
         if (Directory.Exists(absolute)) return await DownloadFolderAsync(absolute, policy, transfer, stagingDirectory, ct);
         var info = new FileInfo(absolute);
         if (!info.Exists) throw new FileNotFoundException($"File not found: {absolute}");
@@ -719,5 +982,54 @@ public static class FileOperations
         foreach (var file in new DirectoryInfo(staging).EnumerateFiles("*.zip.partial"))
             try { if (DateTime.UtcNow - file.LastWriteTimeUtc > StaleStagingAge) file.Delete(); }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
+}
+
+/// <summary>CRC-32 (IEEE 802.3, as used by zip) for checking extracted entries against the zip's checksum.</summary>
+internal static class Crc32
+{
+    public const uint Start = 0xFFFFFFFFu;
+    private static readonly uint[] Table = Enumerable.Range(0, 256).Select(index =>
+    {
+        var value = (uint)index;
+        for (var bit = 0; bit < 8; bit++) value = (value & 1) != 0 ? 0xEDB88320u ^ (value >> 1) : value >> 1;
+        return value;
+    }).ToArray();
+
+    public static uint Append(uint crc, ReadOnlySpan<byte> data)
+    {
+        foreach (var value in data) crc = Table[(crc ^ value) & 0xFF] ^ (crc >> 8);
+        return crc;
+    }
+
+    public static uint Finish(uint crc) => ~crc;
+}
+
+/// <summary>Where a path really leads once every junction, symbolic link and 8.3 short name is resolved.</summary>
+internal static class NativePaths
+{
+    private const uint OpenExisting = 3, BackupSemantics = 0x02000000, ShareAll = 7;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, [Out] char[] path, uint length, uint flags);
+
+    /// <summary>The final local path (X:\...) of an existing file or folder. Network and drive-letterless targets are refused.</summary>
+    public static string FinalPath(string path)
+    {
+        // No access rights requested: only the identity of the object is queried, never its contents.
+        using var handle = CreateFileW(path, 0, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid) throw new IOException($"{path} could not be opened to check where it really leads (Windows error {Marshal.GetLastWin32Error()}).");
+        var buffer = new char[32768];
+        var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+        if (length == 0 || length >= buffer.Length) throw new IOException($"Could not resolve where {path} really leads (Windows error {Marshal.GetLastWin32Error()}).");
+        var result = new string(buffer, 0, (int)length);
+        if (result.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException($"{path} leads to a network location; only local drives are supported.");
+        if (result.StartsWith(@"\\?\", StringComparison.Ordinal)) result = result[4..];
+        if (result.Length < 3 || !char.IsAsciiLetter(result[0]) || result[1] != ':' || result[2] != '\\')
+            throw new UnauthorizedAccessException($"{path} leads to a volume without a drive letter; only local drive paths are supported.");
+        return result.Length > 3 ? Path.TrimEndingDirectorySeparator(result) : result;
     }
 }

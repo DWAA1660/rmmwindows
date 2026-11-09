@@ -103,6 +103,27 @@ public sealed class AgentApi : IDisposable
         using var response = await SendAuthorizedAsync(request, ct);
     }
     public Task FinishFileAsync(string id, object body, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, $"jobs/{Guid.Parse(id):D}/file/complete", body, ct);
+    /// <summary>Reads up to <paramref name="buffer"/>.Length bytes (at most 4 MiB) of a running upload job's file
+    /// starting at <paramref name="offset"/>; returns how many bytes were filled.</summary>
+    public async Task<int> ReadUploadAsync(string id, long offset, Memory<byte> buffer, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"jobs/{Guid.Parse(id):D}/upload?offset={offset}&length={buffer.Length}");
+        using var response = await SendAuthorizedAsync(request, ct);
+        await using var body = await response.Content.ReadAsStreamAsync(ct);
+        var filled = 0;
+        while (true)
+        {
+            var read = await body.ReadAsync(buffer[filled..], ct);
+            if (read == 0) return filled;
+            filled += read;
+            if (filled == buffer.Length)
+            {
+                // The server never sends more than asked; more means something is wrong.
+                if (await body.ReadAsync(new byte[1], ct) != 0) throw new InvalidDataException("The server sent more upload bytes than requested.");
+                return filled;
+            }
+        }
+    }
     public Task<StartResponse?> StartAsync(AgentJob job, CancellationToken ct) => SendAsync<StartResponse>(HttpMethod.Post, $"jobs/{Guid.Parse(job.Id):D}/start", new { job.DispatchToken }, ct);
     public Task UploadAsync(string id, OutputChunk chunk, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Put, $"jobs/{Guid.Parse(id):D}/output/{chunk.Sequence}", new { chunk.Stream, chunk.Text }, ct);
     public Task CompleteAsync(string id, JobCompletion completion, CancellationToken ct) => SendAsync<JsonElement>(HttpMethod.Post, $"jobs/{Guid.Parse(id):D}/complete", completion, ct);
@@ -117,6 +138,12 @@ public sealed class AgentFileTransfer(AgentApi api, string jobId) : IFileTransfe
         RetryAsync(() => api.UploadFileChunkAsync(jobId, sequence, data, ct), ct);
     public Task FinishAsync(string name, long sizeBytes, string sha256, long chunks, CancellationToken ct) =>
         RetryAsync(() => api.FinishFileAsync(jobId, new { name, sizeBytes, sha256, chunks }, ct), ct);
+    public async Task<int> ReadUploadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
+    {
+        var filled = 0;
+        await RetryAsync(async () => filled = await api.ReadUploadAsync(jobId, offset, buffer, ct), ct);
+        return filled;
+    }
     private static async Task RetryAsync(Func<Task> send, CancellationToken ct)
     {
         for (var attempt = 1; ; attempt++)

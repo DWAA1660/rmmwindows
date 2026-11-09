@@ -42,6 +42,8 @@ internal static class AgentSelfTests
             ("file explorer refuses protected, unsafe and secret paths", FileOperationsSafetyAsync),
             ("file explorer download sends exact bytes in chunks with SHA-256", FileOperationsDownloadAsync),
             ("file explorer folder download sends a complete zip and reports what was left out", FileOperationsFolderDownloadAsync),
+            ("file explorer upload saves verified bytes only, never through links or into protected folders", FileOperationsUploadAsync),
+            ("file explorer extract blocks zip slip, zip bombs and links, and keeps going per entry", FileOperationsExtractAsync),
             ("VT screen updates convert to plain text with CR progress", ConsoleRelayTests.ConverterAsync),
             ("relay command line round-trips arguments and searches PATH only", ConsoleRelayTests.CommandLineQuotingAsync),
             ("pipe-buffering child run directly shows progress only at exit", ConsoleRelayTests.DirectBufferedProgressAsync),
@@ -684,6 +686,157 @@ internal static class AgentSelfTests
         public (string Name, long Size, string Sha256, long Chunks)? Finished { get; private set; }
         public Task UploadChunkAsync(long sequence, ReadOnlyMemory<byte> data, CancellationToken ct) { Chunks.Add((sequence, data.ToArray())); return Task.CompletedTask; }
         public Task FinishAsync(string name, long sizeBytes, string sha256, long chunks, CancellationToken ct) { Finished = (name, sizeBytes, sha256, chunks); return Task.CompletedTask; }
+        /// <summary>Bytes the "server" holds for an upload job.</summary>
+        public byte[] UploadSource { get; init; } = [];
+        public List<(long Offset, int Length)> UploadReads { get; } = [];
+        public Task<int> ReadUploadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
+        {
+            UploadReads.Add((offset, buffer.Length));
+            var count = (int)Math.Min(buffer.Length, Math.Max(0, UploadSource.Length - offset));
+            UploadSource.AsMemory((int)offset, count).CopyTo(buffer);
+            return Task.FromResult(count);
+        }
+    }
+
+    private static async Task FileOperationsUploadAsync()
+    {
+        var root = NativePaths.FinalPath(CreateTemp());
+        try
+        {
+            var policy = TempPolicy(root);
+            var destination = Path.Combine(root, "dest");
+            Directory.CreateDirectory(destination);
+            var bytes = new byte[FileOperations.TransferChunkBytes * 2 + 5];
+            new Random(5).NextBytes(bytes);
+            var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+            object Payload(string folder, bool overwrite = false, string? hash = null, string name = "setup ü.exe", long? size = null) =>
+                new { action = "upload", uploadId = Guid.NewGuid().ToString(), name, sizeBytes = size ?? bytes.Length, sha256 = hash ?? sha, destinationDirectory = folder, overwrite };
+            var target = Path.Combine(destination, "setup ü.exe");
+
+            var transfer = new MemoryTransfer { UploadSource = bytes };
+            var saved = await RunFiles(Payload(destination), policy, transfer);
+            Assert(saved.GetProperty("ok").GetBoolean() && File.ReadAllBytes(target).SequenceEqual(bytes), "Uploaded bytes were not saved exactly.");
+            Assert(transfer.UploadReads.Select(read => read.Offset).SequenceEqual([0L, FileOperations.TransferChunkBytes, FileOperations.TransferChunkBytes * 2L]), "Upload was not read in order.");
+            Assert((File.GetAttributes(target) & FileAttributes.Hidden) == 0, "Saved file kept the temporary hidden attribute.");
+
+            var conflict = await RunFiles(Payload(destination), policy, new MemoryTransfer { UploadSource = bytes });
+            Assert(!conflict.GetProperty("ok").GetBoolean() && conflict.GetProperty("error").GetString()!.Contains("already exists"), "Existing file was replaced without overwrite.");
+            var newer = bytes.Reverse().ToArray();
+            var newerSha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(newer));
+            File.SetAttributes(target, FileAttributes.ReadOnly);
+            var replaced = await RunFiles(Payload(destination, overwrite: true, hash: newerSha), policy, new MemoryTransfer { UploadSource = newer });
+            Assert(replaced.GetProperty("replaced").GetBoolean() && File.ReadAllBytes(target).SequenceEqual(newer), "Overwrite did not replace a read-only file.");
+
+            // A corrupted transfer never replaces anything and leaves no partial file behind.
+            var corrupt = await RunFiles(Payload(destination, overwrite: true, hash: sha), policy, new MemoryTransfer { UploadSource = newer });
+            Assert(!corrupt.GetProperty("ok").GetBoolean() && File.ReadAllBytes(target).SequenceEqual(newer), "A SHA-256 mismatch changed the file.");
+            var shortTransfer = await RunFiles(Payload(destination, overwrite: true), policy, new MemoryTransfer { UploadSource = bytes[..100] });
+            Assert(!shortTransfer.GetProperty("ok").GetBoolean(), "A truncated transfer was accepted.");
+            Assert(!Directory.EnumerateFiles(destination, "*.partial", new EnumerationOptions { AttributesToSkip = 0 }).Any(), "Temporary upload files were left behind.");
+
+            var empty = await RunFiles(Payload(destination, name: "empty.txt", size: 0, hash: Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData([]))), policy, new MemoryTransfer());
+            Assert(empty.GetProperty("ok").GetBoolean() && new FileInfo(Path.Combine(destination, "empty.txt")).Length == 0, "Empty upload failed.");
+
+            // Protected folders, unsafe names, links and junction tricks are refused.
+            var data = Path.Combine(root, "agent-data");
+            Directory.CreateDirectory(Path.Combine(data, "sub"));
+            Assert(!(await RunFiles(Payload(data), policy, new MemoryTransfer { UploadSource = bytes })).GetProperty("ok").GetBoolean(), "Upload into the agent data folder.");
+            Assert(!(await RunFiles(Payload(destination, name: "..\\escape.exe"), policy, new MemoryTransfer { UploadSource = bytes })).GetProperty("ok").GetBoolean(), "Unsafe upload name accepted.");
+            if (TryCreateDirectoryLink(Path.Combine(root, "sneaky"), data))
+            {
+                Assert(!(await RunFiles(Payload(Path.Combine(root, "sneaky")), policy, new MemoryTransfer { UploadSource = bytes })).GetProperty("ok").GetBoolean(), "Upload through a junction.");
+                Assert(!(await RunFiles(Payload(Path.Combine(root, "sneaky", "sub")), policy, new MemoryTransfer { UploadSource = bytes })).GetProperty("ok").GetBoolean()
+                    && !File.Exists(Path.Combine(data, "sub", "setup ü.exe")), "Upload reached the agent data folder through a junction ancestor.");
+                Directory.Delete(Path.Combine(root, "sneaky"), recursive: false);
+            }
+        }
+        finally { ForceDelete(root); }
+    }
+
+    private static byte[] BuildZip(Action<System.IO.Compression.ZipArchive> fill)
+    {
+        using var memory = new MemoryStream();
+        using (var zip = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true)) fill(zip);
+        return memory.ToArray();
+    }
+
+    private static void AddEntry(System.IO.Compression.ZipArchive zip, string name, byte[] content)
+    {
+        using var stream = zip.CreateEntry(name).Open();
+        stream.Write(content);
+    }
+
+    private static async Task FileOperationsExtractAsync()
+    {
+        var root = NativePaths.FinalPath(CreateTemp());
+        try
+        {
+            var policy = TempPolicy(root);
+            var big = new byte[3 * 1024 * 1024];
+            new Random(3).NextBytes(big);
+            var zipBytes = BuildZip(zip =>
+            {
+                AddEntry(zip, "a.txt", Encoding.UTF8.GetBytes("alpha"));
+                AddEntry(zip, "dir/b ü.txt", Encoding.UTF8.GetBytes("beta"));
+                AddEntry(zip, "dir/big.bin", big);
+                zip.CreateEntry("dir/empty/");
+                foreach (var evil in new[] { "../evil.txt", "dir/../../evil2.txt", "C:/abs.txt", "/rooted.txt", "x/con.txt", "ads.txt:stream", "link/inside.txt" })
+                    AddEntry(zip, evil, Encoding.UTF8.GetBytes("evil"));
+                AddEntry(zip, "bomb.txt", new byte[1024 * 1024]);
+            });
+            // Make bomb.txt claim to be 10 bytes in the central directory while really holding 1 MiB.
+            var name = Encoding.UTF8.GetBytes("bomb.txt");
+            for (var index = 0; index < zipBytes.Length - 46; index++)
+                if (zipBytes[index] == 0x50 && zipBytes[index + 1] == 0x4b && zipBytes[index + 2] == 1 && zipBytes[index + 3] == 2
+                    && zipBytes.AsSpan(index + 46, name.Length).SequenceEqual(name))
+                    BitConverter.GetBytes(10u).CopyTo(zipBytes, index + 24);
+            var zipPath = Path.Combine(root, "package.zip");
+            File.WriteAllBytes(zipPath, zipBytes);
+            var output = Path.Combine(root, "out");
+
+            var first = await RunFiles(new { action = "extract", path = zipPath, destinationDirectory = output }, policy);
+            Assert(File.ReadAllText(Path.Combine(output, "a.txt")) == "alpha" && File.ReadAllText(Path.Combine(output, "dir", "b ü.txt")) == "beta"
+                && File.ReadAllBytes(Path.Combine(output, "dir", "big.bin")).SequenceEqual(big) && Directory.Exists(Path.Combine(output, "dir", "empty")), "Zip contents were not extracted exactly.");
+            Assert(!File.Exists(Path.Combine(root, "evil.txt")) && !File.Exists(Path.Combine(Path.GetDirectoryName(root)!, "evil2.txt")) && !File.Exists("C:\\abs.txt") && !File.Exists("C:\\rooted.txt"),
+                "A zip-slip entry escaped the destination.");
+            Assert(!File.Exists(Path.Combine(output, "bomb.txt")), "An entry whose real size differs from the declared size was extracted.");
+            Assert(Crc32.Finish(Crc32.Append(Crc32.Start, "123456789"u8)) == 0xCBF43926u, "CRC-32 check value is wrong.");
+            var failedPaths = first.GetProperty("results").EnumerateArray().Select(item => item.GetProperty("path").GetString()!).ToArray();
+            Assert(!first.GetProperty("ok").GetBoolean() && first.GetProperty("files").GetInt32() == 4 && failedPaths.Length == 7
+                && failedPaths.Any(path => path.EndsWith("bomb.txt")) && failedPaths.Contains("../evil.txt"), $"Unexpected extract result: {string.Join(" | ", failedPaths)}");
+            Assert(!Directory.EnumerateFiles(output, "*.partial", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0 }).Any(), "Temporary extract files were left behind.");
+
+            // Existing files: reported without overwrite, replaced with it.
+            File.WriteAllText(Path.Combine(output, "a.txt"), "changed");
+            var again = await RunFiles(new { action = "extract", path = zipPath, destinationDirectory = output }, policy);
+            Assert(File.ReadAllText(Path.Combine(output, "a.txt")) == "changed" && again.GetProperty("results").EnumerateArray().Any(item => item.GetProperty("error").GetString()!.Contains("already exists")),
+                "Existing file was replaced without overwrite.");
+            await RunFiles(new { action = "extract", path = zipPath, destinationDirectory = output, overwrite = true }, policy);
+            Assert(File.ReadAllText(Path.Combine(output, "a.txt")) == "alpha", "Overwrite did not replace the file.");
+
+            // Never through a link inside the destination, and never into protected folders.
+            var data = Path.Combine(root, "agent-data");
+            Directory.CreateDirectory(data);
+            Directory.Delete(Path.Combine(output, "link"), recursive: true); // the first extract created it as a plain folder
+            if (TryCreateDirectoryLink(Path.Combine(output, "link"), data))
+            {
+                await RunFiles(new { action = "extract", path = zipPath, destinationDirectory = output, overwrite = true }, policy);
+                Assert(!File.Exists(Path.Combine(data, "inside.txt")), "Extraction followed a junction into the agent data folder.");
+                Directory.Delete(Path.Combine(output, "link"), recursive: false);
+            }
+            Assert(!(await RunFiles(new { action = "extract", path = zipPath, destinationDirectory = Path.Combine(data, "x") }, policy)).GetProperty("ok").GetBoolean()
+                && !Directory.Exists(Path.Combine(data, "x")), "Extracted into the agent data folder.");
+            File.WriteAllText(Path.Combine(root, "not-a-zip.zip"), "plain text");
+            Assert(!(await RunFiles(new { action = "extract", path = Path.Combine(root, "not-a-zip.zip"), destinationDirectory = Path.Combine(root, "bad") }, policy)).GetProperty("ok").GetBoolean()
+                && !Directory.Exists(Path.Combine(root, "bad")), "A damaged zip created output.");
+            foreach (var bad in new[] { "..\\x", "a\\..\\..\\x", "C:\\x", "x:y", "con" })
+            {
+                var refused = false;
+                try { FileOperations.EntryTarget(output, bad); } catch (ArgumentException) { refused = true; }
+                Assert(refused, $"Unsafe zip entry accepted: {bad}");
+            }
+        }
+        finally { ForceDelete(root); }
     }
 
     private static async Task FileOperationsDownloadAsync()
