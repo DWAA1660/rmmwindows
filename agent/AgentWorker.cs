@@ -209,7 +209,8 @@ public sealed class AgentWorker(AgentConfiguration configuration, AgentApi api, 
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     deadline.CancelAfter(TimeSpan.FromSeconds(timeout));
                     var outcome = await FileOperations.ExecuteAsync(job.Payload, FileSafetyPolicy.ForAgent(configuration.DataDirectory),
-                        new AgentFileTransfer(api, job.Id), deadline.Token);
+                        new AgentFileTransfer(api, job.Id), deadline.Token,
+                        stagingDirectory: Path.Combine(configuration.DataDirectory, "download-staging"));
                     await journal.AppendAsync("stdout", outcome.Json);
                     await journal.CompleteAsync(new JobCompletion(outcome.Status, outcome.ExitCode, outcome.Summary));
                     break;

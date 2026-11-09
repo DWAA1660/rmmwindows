@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -76,11 +77,18 @@ public sealed class FileSafetyPolicy
             if (Inside(target, tree)) throw new UnauthorizedAccessException($"{tree} is protected; files cannot be placed there remotely.");
     }
 
+    public const string SecretMessage = "The agent's data folder holds its credential and cannot be read remotely.";
+
     public void EnsureReadable(string path)
     {
+        if (!IsReadable(path)) throw new UnauthorizedAccessException(SecretMessage);
+    }
+
+    /// <summary>False for anything inside the agent data tree (also used to leave it out of folder zips).</summary>
+    public bool IsReadable(string path)
+    {
         var target = Path.TrimEndingDirectorySeparator(path);
-        foreach (var tree in secretTrees)
-            if (Inside(target, tree)) throw new UnauthorizedAccessException("The agent's data folder holds its credential and cannot be read remotely.");
+        return !secretTrees.Any(tree => Inside(target, tree));
     }
 }
 
@@ -91,6 +99,12 @@ public static class FileOperations
     public const int TransferChunkBytes = 2 * 1024 * 1024;
     public const int MaxListEntries = 20_000;
     public const int MaxItems = 500;
+    /// <summary>Folder downloads: most files/folders one zip may hold, and how many left-out items are listed.</summary>
+    public const int MaxArchiveEntries = 100_000;
+    public const int MaxSkippedListed = 500;
+    /// <summary>Free space that must remain on the staging drive after the zip is built.</summary>
+    public const long StagingReserveBytes = 512L * 1024 * 1024;
+    private static readonly TimeSpan StaleStagingAge = TimeSpan.FromDays(1);
     private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
@@ -98,7 +112,9 @@ public static class FileOperations
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
     };
 
-    public static async Task<FileJobOutcome> ExecuteAsync(JsonElement payload, FileSafetyPolicy policy, IFileTransfer? transfer, CancellationToken ct)
+    /// <param name="stagingDirectory">Where folder downloads build their temporary zip. The agent passes a
+    /// folder inside its own data directory (SYSTEM/Administrators-only and never readable remotely).</param>
+    public static async Task<FileJobOutcome> ExecuteAsync(JsonElement payload, FileSafetyPolicy policy, IFileTransfer? transfer, CancellationToken ct, string? stagingDirectory = null)
     {
         var action = payload.TryGetProperty("action", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
         try
@@ -111,7 +127,7 @@ public static class FileOperations
                 "copy" => Transfer(action, payload, policy, ct),
                 "rename" => Mutation(action, [Rename(String(payload, "path"), String(payload, "newName"), policy)]),
                 "mkdir" => Mutation(action, [MakeDirectory(String(payload, "path"), policy)]),
-                "download" => await DownloadAsync(String(payload, "path"), policy, transfer ?? throw new InvalidOperationException("File transfer is unavailable."), ct),
+                "download" => await DownloadAsync(String(payload, "path"), policy, transfer ?? throw new InvalidOperationException("File transfer is unavailable."), stagingDirectory, ct),
                 _ => Failure(action, "Unsupported file action; nothing was changed.")
             };
         }
@@ -488,20 +504,28 @@ public static class FileOperations
 
     // ---------- download ----------
 
-    private static async Task<FileJobOutcome> DownloadAsync(string path, FileSafetyPolicy policy, IFileTransfer transfer, CancellationToken ct)
+    private static async Task<FileJobOutcome> DownloadAsync(string path, FileSafetyPolicy policy, IFileTransfer transfer, string? stagingDirectory, CancellationToken ct)
     {
         var absolute = ValidatePath(path);
         policy.EnsureReadable(absolute);
+        if (Directory.Exists(absolute)) return await DownloadFolderAsync(absolute, policy, transfer, stagingDirectory, ct);
         var info = new FileInfo(absolute);
-        if (Directory.Exists(absolute)) throw new IOException("Folders cannot be downloaded; download individual files.");
         if (!info.Exists) throw new FileNotFoundException($"File not found: {absolute}");
         if (IsLink(info)) throw new IOException($"{absolute} is a link; links are never followed for downloads.");
         if (info.Length > MaxDownloadBytes) throw new IOException($"{absolute} is {info.Length:N0} bytes; the download limit is {MaxDownloadBytes:N0} bytes.");
+        var (total, sha256, chunks) = await UploadAsync(absolute, info.Name, transfer, ct);
+        var json = JsonSerializer.Serialize(new { action = "download", ok = true, path = absolute, name = info.Name, size = total, sha256, chunks, archive = false }, AgentConfiguration.Json);
+        return new(json, "succeeded", 0, $"Uploaded {info.Name} ({total:N0} bytes, SHA-256 {sha256[..12]}…) to the server.");
+    }
+
+    /// <summary>Streams one local file to the server in fixed-size chunks; returns its size, SHA-256 and chunk count.</summary>
+    private static async Task<(long Total, string Sha256, long Chunks)> UploadAsync(string file, string name, IFileTransfer transfer, CancellationToken ct)
+    {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[TransferChunkBytes];
         long total = 0, sequence = 0;
         // Share read/write/delete so files in use (logs) can still be read.
-        await using (var stream = new FileStream(absolute, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81920, FileOptions.SequentialScan | FileOptions.Asynchronous))
+        await using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81920, FileOptions.SequentialScan | FileOptions.Asynchronous))
         {
             while (true)
             {
@@ -514,15 +538,186 @@ public static class FileOperations
                 }
                 if (filled == 0) break;
                 total += filled;
-                if (total > MaxDownloadBytes) throw new IOException($"{absolute} grew beyond the {MaxDownloadBytes:N0}-byte download limit while it was read.");
+                if (total > MaxDownloadBytes) throw new IOException($"{file} grew beyond the {MaxDownloadBytes:N0}-byte download limit while it was read.");
                 hash.AppendData(buffer, 0, filled);
                 await transfer.UploadChunkAsync(sequence++, buffer.AsMemory(0, filled), ct);
                 if (filled < buffer.Length) break;
             }
         }
         var sha256 = Convert.ToHexStringLower(hash.GetHashAndReset());
-        await transfer.FinishAsync(info.Name, total, sha256, sequence, ct);
-        var json = JsonSerializer.Serialize(new { action = "download", ok = true, path = absolute, name = info.Name, size = total, sha256, chunks = sequence }, AgentConfiguration.Json);
-        return new(json, "succeeded", 0, $"Uploaded {info.Name} ({total:N0} bytes, SHA-256 {sha256[..12]}…) to the server.");
+        await transfer.FinishAsync(name, total, sha256, sequence, ct);
+        return (total, sha256, sequence);
+    }
+
+    // ---------- folder download (zip) ----------
+
+    private sealed record ArchiveItem(string FullPath, string EntryName, bool IsDirectory, DateTime LastWriteTime);
+    private sealed record SkippedItem(string Path, string Error);
+
+    /// <summary>
+    /// Compresses a folder into one zip whose top-level entry is the folder itself (like Explorer's
+    /// "Compressed (zipped) folder"), then uploads it exactly like a single file. The zip is built in the
+    /// staging folder and always deleted afterwards. Links are never followed and the agent data tree is
+    /// never included; those, and files that cannot be opened (in use, access denied), are left out and
+    /// listed in the result. A file that fails part-way through reading fails the whole job, so a zip
+    /// never contains a silently truncated file.
+    /// </summary>
+    private static async Task<FileJobOutcome> DownloadFolderAsync(string folder, FileSafetyPolicy policy, IFileTransfer transfer, string? stagingDirectory, CancellationToken ct)
+    {
+        var root = new DirectoryInfo(folder);
+        if (IsLink(root)) throw new IOException($"{folder} is a link (symbolic link or junction); links are never followed for downloads.");
+        if (Path.GetPathRoot(folder) is { } driveRoot && string.Equals(driveRoot, folder, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("A whole drive cannot be downloaded; open it and download individual folders.");
+        var staging = Path.TrimEndingDirectorySeparator(Path.GetFullPath(stagingDirectory ?? Path.Combine(Path.GetTempPath(), "LibraryRmm-download-staging")));
+        if (IsSameOrInside(folder, staging)) throw new UnauthorizedAccessException("The agent's temporary download folder cannot be downloaded.");
+
+        var skipped = new List<SkippedItem>();
+        var items = CollectArchiveItems(root, policy, staging, skipped, ct);
+        var folderCount = items.Count(item => item.IsDirectory);
+        long sourceBytes = 0;
+        foreach (var item in items.Where(item => !item.IsDirectory))
+            try { sourceBytes += new FileInfo(item.FullPath).Length; } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+
+        Directory.CreateDirectory(staging);
+        RemoveStaleStagingFiles(staging);
+        var drive = new DriveInfo(Path.GetPathRoot(staging)!);
+        var needed = Math.Min(sourceBytes, MaxDownloadBytes) + StagingReserveBytes;
+        if (drive.AvailableFreeSpace < needed)
+            throw new IOException($"Not enough free space on {drive.Name} to build the zip: {drive.AvailableFreeSpace:N0} bytes free, {needed:N0} needed (the zip plus a {StagingReserveBytes / (1024 * 1024)} MiB safety margin). Nothing was sent.");
+
+        var name = ArchiveName(root.Name);
+        var archivePath = Path.Combine(staging, $"{Guid.NewGuid():N}.zip.partial");
+        try
+        {
+            var included = await WriteArchiveAsync(archivePath, items, skipped, ct);
+            var (total, sha256, chunks) = await UploadAsync(archivePath, name, transfer, ct);
+            var json = JsonSerializer.Serialize(new
+            {
+                action = "download", ok = true, path = folder, name, size = total, sha256, chunks, archive = true,
+                files = included, folders = folderCount, sourceBytes,
+                skippedCount = skipped.Count,
+                skipped = skipped.Take(MaxSkippedListed).Select(item => new { path = item.Path, error = item.Error }),
+                skippedListTruncated = skipped.Count > MaxSkippedListed
+            }, AgentConfiguration.Json);
+            var summary = $"Compressed {folder} ({included:N0} file(s), {folderCount:N0} folder(s), {sourceBytes:N0} bytes) into {name} ({total:N0} bytes, SHA-256 {sha256[..12]}…) and uploaded it to the server.";
+            if (skipped.Count > 0) summary += $" {skipped.Count:N0} item(s) were left out (first: {skipped[0].Path} — {skipped[0].Error}); the job output lists them.";
+            return new(json, "succeeded", 0, Limit(summary));
+        }
+        finally
+        {
+            try { File.Delete(archivePath); } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { /* removed by the next stale sweep */ }
+        }
+    }
+
+    /// <summary>Walks the tree without following links: folders (as "name/" entries) and files, in name order.</summary>
+    private static List<ArchiveItem> CollectArchiveItems(DirectoryInfo root, FileSafetyPolicy policy, string staging, List<SkippedItem> skipped, CancellationToken ct)
+    {
+        var items = new List<ArchiveItem>();
+        var pending = new Stack<(DirectoryInfo Directory, string EntryName)>();
+        pending.Push((root, root.Name));
+        var options = new EnumerationOptions { IgnoreInaccessible = false, AttributesToSkip = 0, RecurseSubdirectories = false };
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (directory, entryName) = pending.Pop();
+            items.Add(new ArchiveItem(directory.FullName, entryName, true, directory.LastWriteTime));
+            FileSystemInfo[] children;
+            try { children = directory.EnumerateFileSystemInfos("*", options).OrderBy(child => child.Name, StringComparer.OrdinalIgnoreCase).ToArray(); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                skipped.Add(new SkippedItem(directory.FullName, $"Folder contents could not be read: {exception.Message}"));
+                continue;
+            }
+            var subdirectories = new List<(DirectoryInfo, string)>();
+            foreach (var child in children)
+            {
+                // Our own temporary zip is not user data; leave it out without listing it.
+                if (IsSameOrInside(child.FullName, staging)) continue;
+                if (!policy.IsReadable(child.FullName)) { skipped.Add(new SkippedItem(child.FullName, FileSafetyPolicy.SecretMessage)); continue; }
+                if (IsLink(child)) { skipped.Add(new SkippedItem(child.FullName, "Link (symbolic link or junction); links are never followed.")); continue; }
+                var childEntry = $"{entryName}/{child.Name}";
+                if (child is DirectoryInfo subdirectory) subdirectories.Add((subdirectory, childEntry));
+                else items.Add(new ArchiveItem(child.FullName, childEntry, false, child.LastWriteTime));
+                if (items.Count + subdirectories.Count + pending.Count > MaxArchiveEntries)
+                    throw new IOException($"{root.FullName} holds more than {MaxArchiveEntries:N0} files and folders; download smaller folders instead. Nothing was sent.");
+            }
+            // Pushed in reverse so subfolders are visited in name order.
+            for (var index = subdirectories.Count - 1; index >= 0; index--) pending.Push(subdirectories[index]);
+        }
+        return items;
+    }
+
+    /// <summary>Writes the zip; returns how many files went in. Files that cannot be opened are added to <paramref name="skipped"/>.</summary>
+    private static async Task<int> WriteArchiveAsync(string archivePath, List<ArchiveItem> items, List<SkippedItem> skipped, CancellationToken ct)
+    {
+        var buffer = new byte[1024 * 1024];
+        var included = 0;
+        await using var output = new FileStream(archivePath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 81920);
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var item in items)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (item.IsDirectory)
+                {
+                    zip.CreateEntry(item.EntryName + "/").LastWriteTime = ZipTime(item.LastWriteTime);
+                    continue;
+                }
+                FileStream source;
+                try { source = new FileStream(item.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81920, FileOptions.SequentialScan | FileOptions.Asynchronous); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                {
+                    // Not opened, so nothing of it is in the zip: list it instead of failing the whole folder.
+                    skipped.Add(new SkippedItem(item.FullPath, exception.Message));
+                    continue;
+                }
+                await using (source)
+                {
+                    var entry = zip.CreateEntry(item.EntryName, CompressionLevel.Optimal);
+                    entry.LastWriteTime = ZipTime(item.LastWriteTime);
+                    await using var target = entry.Open();
+                    while (true)
+                    {
+                        int read;
+                        try { read = await source.ReadAsync(buffer, ct); }
+                        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                        {
+                            throw new IOException($"{item.FullPath} could not be read completely ({exception.Message}). The zip was discarded and nothing was sent.", exception);
+                        }
+                        if (read == 0) break;
+                        await target.WriteAsync(buffer.AsMemory(0, read), ct);
+                        if (output.Position > MaxDownloadBytes) throw TooLarge();
+                    }
+                }
+                included++;
+            }
+        }
+        if (output.Length > MaxDownloadBytes) throw TooLarge();
+        return included;
+
+        static IOException TooLarge() => new($"The zip grew beyond the {MaxDownloadBytes:N0}-byte download limit; download smaller folders instead. Nothing was sent.");
+    }
+
+    /// <summary>Zip timestamps only cover 1980–2107.</summary>
+    private static DateTimeOffset ZipTime(DateTime local)
+    {
+        var minimum = new DateTime(1980, 1, 1, 0, 0, 0, DateTimeKind.Local);
+        var maximum = new DateTime(2107, 12, 31, 23, 59, 58, DateTimeKind.Local);
+        return new DateTimeOffset(local < minimum ? minimum : local > maximum ? maximum : local);
+    }
+
+    /// <summary>"Folder" -> "Folder.zip", kept within the server's 255-character name limit.</summary>
+    internal static string ArchiveName(string folderName)
+    {
+        var stem = folderName.TrimEnd('.', ' ');
+        if (stem.Length > 251) stem = stem[..251].TrimEnd('.', ' ');
+        return (stem.Length == 0 ? "folder" : stem) + ".zip";
+    }
+
+    private static void RemoveStaleStagingFiles(string staging)
+    {
+        foreach (var file in new DirectoryInfo(staging).EnumerateFiles("*.zip.partial"))
+            try { if (DateTime.UtcNow - file.LastWriteTimeUtc > StaleStagingAge) file.Delete(); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
     }
 }
