@@ -10,21 +10,40 @@ import {
   BookOpen,
   CheckCircle2,
   ChevronDown,
+  CircleHelp,
+  Ellipsis,
   Keyboard,
+  KeyboardOff,
   Loader2,
   LockKeyhole,
   Maximize2,
   Monitor,
   MousePointer2,
+  Pointer,
   Power,
   ShieldCheck,
+  Shrink,
   Signal,
+  Touchpad,
   WifiOff,
+  X,
   XCircle,
 } from "lucide-react";
 import "./RemoteSupport.css";
+import "./RemoteSupportTouch.css";
 import { supportEndReason } from "./supportEndReason";
 import { parseSupportFrame } from "./supportFrames";
+import {
+  KEYBOARD_SENTINEL,
+  diffText,
+  keyToMessages,
+  strokesToMessages,
+  textToStrokes,
+  type KeyEventMessage,
+  type KeyStroke,
+  type Modifier,
+} from "./supportKeyboard";
+import { TouchGestures, type GestureAction, type TouchMode } from "./supportTouch";
 
 type SupportStatus =
   | "requested"
@@ -138,10 +157,65 @@ const allowedKey = (code: string) =>
     "NumpadEnter",
   ]).has(code);
 
-/** Call directly from a user click so browsers permit the dedicated support window. */
+// Touch screens, and windows too narrow or short for the desktop toolbar (phones in landscape are about 375px tall).
+const touchLayoutQuery = "(pointer: coarse), (max-width: 760px), (max-height: 480px)";
+const media = (query: string) =>
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(query).matches
+    : false;
+// Per-viewer conveniences only; the page works the same when storage is blocked.
+const readPreference = (key: string) => {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+const writePreference = (key: string, value: string) => {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* Private windows can refuse storage. */
+  }
+};
+const modifierKeys: { code: Modifier; label: string }[] = [
+  { code: "ControlLeft", label: "Ctrl" },
+  { code: "AltLeft", label: "Alt" },
+  { code: "ShiftLeft", label: "Shift" },
+  { code: "MetaLeft", label: "Win" },
+];
+const navigationKeys: { code: string; label: string; wide?: boolean }[] = [
+  { code: "Escape", label: "Esc" },
+  { code: "Tab", label: "Tab" },
+  { code: "ArrowLeft", label: "←" },
+  { code: "ArrowUp", label: "↑" },
+  { code: "ArrowDown", label: "↓" },
+  { code: "ArrowRight", label: "→" },
+  { code: "Home", label: "Home" },
+  { code: "End", label: "End" },
+  { code: "PageUp", label: "PgUp" },
+  { code: "PageDown", label: "PgDn" },
+  { code: "Delete", label: "Del" },
+  { code: "Backspace", label: "⌫" },
+  { code: "Enter", label: "Enter", wide: true },
+];
+const functionKeys = Array.from({ length: 12 }, (_, index) => ({
+  code: `F${index + 1}`,
+  label: `F${index + 1}`,
+}));
+
+/**
+ * Call directly from a user click so browsers permit the dedicated support window. Phones and tablets (and the
+ * installed home-screen app, which cannot share its sign-in with a separate browser window) open it in this tab.
+ */
 export function openRemoteSupport(endpointId: string): Window | null {
+  const url = `/support/new?endpointId=${encodeURIComponent(endpointId)}`;
+  if (media("(pointer: coarse)") || media("(display-mode: standalone)")) {
+    window.location.assign(url);
+    return window;
+  }
   const popup = window.open(
-    `/support/new?endpointId=${encodeURIComponent(endpointId)}`,
+    url,
     "_blank",
     "popup,width=1360,height=900,resizable=yes,scrollbars=yes",
   );
@@ -214,6 +288,35 @@ export function RemoteSupport() {
     framesDrawn = useRef(0);
   const [fps, setFps] = useState(0),
     [secureDesktop, setSecureDesktop] = useState(false);
+
+  // Phones and tablets: gestures, on-screen keyboard, local zoom.
+  const [touchLayout, setTouchLayout] = useState(() => media(touchLayoutQuery));
+  const [touchMode, setTouchModeState] = useState<TouchMode>(() =>
+    readPreference("rs-touch-mode") === "direct" ? "direct" : "trackpad",
+  );
+  const [keyboardOpen, setKeyboardOpen] = useState(false),
+    [modifiers, setModifiers] = useState<Modifier[]>([]),
+    [showFunctionKeys, setShowFunctionKeys] = useState(false),
+    [moreOpen, setMoreOpen] = useState(false),
+    [helpOpen, setHelpOpen] = useState(false),
+    [typingNote, setTypingNote] = useState(""),
+    [zoomScale, setZoomScale] = useState(1),
+    [viewport, setViewport] = useState<{ height: number; top: number } | null>(
+      null,
+    );
+  const ime = useRef<HTMLTextAreaElement>(null),
+    imeValue = useRef(KEYBOARD_SENTINEL),
+    composing = useRef(false),
+    modifiersRef = useRef<Modifier[]>([]),
+    keyQueue = useRef<KeyEventMessage[]>([]),
+    keyTimer = useRef<number | null>(null),
+    typingNoteTimer = useRef<number | null>(null),
+    zoom = useRef({ scale: 1, x: 0, y: 0 }),
+    cursorDot = useRef<HTMLDivElement>(null),
+    holdRing = useRef<HTMLDivElement>(null),
+    gestures = useRef<TouchGestures | null>(null),
+    touchModeRef = useRef(touchMode);
+  touchModeRef.current = touchMode;
 
   const sendControl = (message: object) => {
     if (socket.current?.readyState === WebSocket.OPEN)
@@ -352,6 +455,11 @@ export function RemoteSupport() {
     if (moveTimer.current !== null) window.clearTimeout(moveTimer.current);
     moveTimer.current = null;
     pendingMove.current = null;
+    // Typed text still waiting to be paced out is dropped, never sent after control ends.
+    keyQueue.current = [];
+    if (keyTimer.current !== null) window.clearTimeout(keyTimer.current);
+    keyTimer.current = null;
+    gestures.current?.cancel();
     // Release is allowed without local control so revoked focus cannot leave keys held.
     if (pressedKeys.current.size || pressedButtons.current.size)
       send({ type: "input", action: "releaseAll" });
@@ -364,6 +472,9 @@ export function RemoteSupport() {
     canInput.current = false;
     setControlEnabled(false);
     setFocused(false);
+    modifiersRef.current = [];
+    setModifiers([]);
+    if (document.activeElement === ime.current) ime.current?.blur();
   };
   const request = async <T,>(
     path: string,
@@ -821,7 +932,7 @@ export function RemoteSupport() {
     };
   };
   const move = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!canInput.current || !event.isPrimary) return;
+    if (!canInput.current || !event.isPrimary || event.pointerType === "touch") return;
     pendingMove.current = point(event);
     if (moveTimer.current !== null) return;
     moveTimer.current = window.setTimeout(() => {
@@ -833,6 +944,7 @@ export function RemoteSupport() {
   };
   const pointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (
+      event.pointerType === "touch" ||
       !approved ||
       !control.current ||
       !event.isPrimary ||
@@ -858,7 +970,7 @@ export function RemoteSupport() {
     });
   };
   const pointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!pressedButtons.current.has(event.button)) return;
+    if (event.pointerType === "touch" || !pressedButtons.current.has(event.button)) return;
     event.preventDefault();
     const position = point(event);
     send({
@@ -919,6 +1031,389 @@ export function RemoteSupport() {
     surface.addEventListener("wheel", wheel, { passive: false });
     return () => surface.removeEventListener("wheel", wheel);
   }, []);
+
+  // ----- Phones and tablets -------------------------------------------------------------------------------------
+  // Remote keys are paced (about 200 events a second) so pasted or swiped text stays under the endpoint's
+  // input limit instead of being dropped there.
+  const pumpKeys = () => {
+    keyTimer.current = null;
+    if (!canInput.current) {
+      releaseAll();
+      return;
+    }
+    for (let sent = 0; sent < 8 && keyQueue.current.length; sent++) {
+      const next = keyQueue.current.shift()!;
+      if (!send({ type: "input", action: next.action, key: next.key })) {
+        releaseAll();
+        return;
+      }
+      if (next.action === "keyDown") pressedKeys.current.add(next.key);
+      else pressedKeys.current.delete(next.key);
+    }
+    if (keyQueue.current.length) keyTimer.current = window.setTimeout(pumpKeys, 40);
+  };
+  const queueKeys = (messages: KeyEventMessage[]) => {
+    if (!messages.length || !canInput.current) return;
+    keyQueue.current.push(...messages);
+    if (keyTimer.current === null) pumpKeys();
+  };
+  const takeModifiers = () => {
+    const active = modifiersRef.current;
+    if (active.length) {
+      modifiersRef.current = [];
+      setModifiers([]);
+    }
+    return active;
+  };
+  const toggleModifier = (code: Modifier) => {
+    const next = modifiersRef.current.includes(code)
+      ? modifiersRef.current.filter((item) => item !== code)
+      : [...modifiersRef.current, code];
+    modifiersRef.current = next;
+    setModifiers(next);
+  };
+  const pressKey = (code: string) => {
+    if (!canInput.current) return;
+    queueKeys(keyToMessages(code, takeModifiers()));
+    navigator.vibrate?.(8);
+  };
+  const noteTyping = (message: string) => {
+    setTypingNote(message);
+    if (typingNoteTimer.current !== null) window.clearTimeout(typingNoteTimer.current);
+    typingNoteTimer.current = window.setTimeout(() => setTypingNote(""), 4000);
+  };
+  const resetIme = () => {
+    const field = ime.current;
+    if (!field || composing.current) return;
+    field.value = KEYBOARD_SENTINEL;
+    imeValue.current = KEYBOARD_SENTINEL;
+    field.setSelectionRange(KEYBOARD_SENTINEL.length, KEYBOARD_SENTINEL.length);
+  };
+  const imeChanged = () => {
+    const field = ime.current;
+    if (!field) return;
+    const { deletions, insert } = diffText(imeValue.current, field.value);
+    imeValue.current = field.value;
+    if (canInput.current && (deletions || insert)) {
+      const typed = textToStrokes(insert);
+      const strokes: KeyStroke[] = [
+        ...Array.from({ length: deletions }, () => ({ code: "Backspace", shift: false })),
+        ...typed.strokes,
+      ];
+      queueKeys(strokesToMessages(strokes, takeModifiers()));
+      if (typed.skipped)
+        noteTyping(
+          `${typed.skipped} character${typed.skipped === 1 ? "" : "s"} skipped: only keys on a US keyboard can be typed.`,
+        );
+    }
+    if (
+      !composing.current &&
+      (field.value.length > 64 ||
+        field.value.length < KEYBOARD_SENTINEL.length / 2 ||
+        field.value.includes("\n"))
+    )
+      resetIme();
+  };
+  const imeKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    // Hardware keyboards on tablets: shortcuts and keys that do not type text go straight through.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.code === "Escape") {
+      event.preventDefault();
+      disableControl();
+      return;
+    }
+    if (!canInput.current || !allowedKey(event.code)) return;
+    if (/^(Shift|Control|Alt|Meta)(Left|Right)$/.test(event.code)) return;
+    const held: Modifier[] = [];
+    if (event.ctrlKey) held.push("ControlLeft");
+    if (event.altKey) held.push("AltLeft");
+    if (event.metaKey) held.push("MetaLeft");
+    const nonText =
+      /^(Arrow|F\d|Home|End|Page|Insert|Delete|Tab|Escape)/.test(event.code);
+    if (!held.length && !nonText) return; // Text, Enter and Backspace arrive through the text box.
+    event.preventDefault();
+    if (event.shiftKey) held.push("ShiftLeft");
+    const combined = [...new Set([...held, ...takeModifiers()])];
+    queueKeys(keyToMessages(event.code, combined));
+  };
+  const openKeyboard = () => {
+    const field = ime.current;
+    if (!field || !canInput.current) return;
+    resetIme();
+    // Must run inside the tap so phones agree to show their keyboard.
+    field.focus({ preventScroll: true });
+    setKeyboardOpen(true);
+    setFocused(true);
+  };
+  const closeKeyboard = () => {
+    ime.current?.blur();
+    setKeyboardOpen(false);
+  };
+
+  // Local zoom: the canvas is transformed in place, so pointer mapping (getBoundingClientRect) stays exact.
+  const applyZoom = (next: { scale: number; x: number; y: number }) => {
+    zoom.current = next;
+    const surface = canvas.current;
+    if (surface)
+      surface.style.transform =
+        next.scale === 1 && !next.x && !next.y
+          ? ""
+          : `translate(${next.x}px, ${next.y}px) scale(${next.scale})`;
+    setZoomScale((previous) =>
+      Math.abs(previous - next.scale) > 0.04 || (next.scale === 1) !== (previous === 1)
+        ? next.scale
+        : previous,
+    );
+    placeCursor();
+  };
+  const fitAxis = (low: number, high: number, base: number, size: number, offset: number) =>
+    size <= high - low
+      ? (low + high) / 2 - base - size / 2
+      : Math.min(low - base, Math.max(high - base - size, offset));
+  const zoomTo = (
+    scale: number,
+    originX: number,
+    originY: number,
+    panX = 0,
+    panY = 0,
+  ) => {
+    const surface = canvas.current,
+      area = stage.current;
+    if (!surface || !area) return;
+    const current = zoom.current;
+    const rect = surface.getBoundingClientRect();
+    const left = rect.left - current.x,
+      top = rect.top - current.y;
+    const width = rect.width / current.scale,
+      height = rect.height / current.scale;
+    const nextScale = Math.min(5, Math.max(1, scale));
+    if (nextScale === 1) {
+      applyZoom({ scale: 1, x: 0, y: 0 });
+      return;
+    }
+    const factor = nextScale / current.scale;
+    const bounds = area.getBoundingClientRect();
+    applyZoom({
+      scale: nextScale,
+      x: fitAxis(
+        bounds.left,
+        bounds.right,
+        left,
+        width * nextScale,
+        originX - left - factor * (originX - left - current.x) + panX,
+      ),
+      y: fitAxis(
+        bounds.top,
+        bounds.bottom,
+        top,
+        height * nextScale,
+        originY - top - factor * (originY - top - current.y) + panY,
+      ),
+    });
+  };
+  // Trackpad mode: keep the remote pointer in view while zoomed, like panning a magnifier.
+  const followCursor = () => {
+    const surface = canvas.current,
+      area = stage.current,
+      tracker = gestures.current;
+    if (!surface || !area || !tracker || zoom.current.scale === 1) return;
+    const rect = surface.getBoundingClientRect(),
+      bounds = area.getBoundingClientRect();
+    const x = rect.left + tracker.cursor.x * rect.width,
+      y = rect.top + tracker.cursor.y * rect.height;
+    const marginX = bounds.width * 0.15,
+      marginY = bounds.height * 0.15;
+    const shiftX =
+      x < bounds.left + marginX
+        ? bounds.left + marginX - x
+        : x > bounds.right - marginX
+          ? bounds.right - marginX - x
+          : 0;
+    const shiftY =
+      y < bounds.top + marginY
+        ? bounds.top + marginY - y
+        : y > bounds.bottom - marginY
+          ? bounds.bottom - marginY - y
+          : 0;
+    if (shiftX || shiftY) zoomTo(zoom.current.scale, 0, 0, shiftX, shiftY);
+  };
+  const placeCursor = () => {
+    const dot = cursorDot.current,
+      surface = canvas.current,
+      area = stage.current,
+      tracker = gestures.current;
+    if (!dot || !surface || !area || !tracker) return;
+    const rect = surface.getBoundingClientRect(),
+      bounds = area.getBoundingClientRect();
+    dot.style.transform = `translate(${rect.left - bounds.left + tracker.cursor.x * rect.width}px, ${rect.top - bounds.top + tracker.cursor.y * rect.height}px)`;
+  };
+  const showHold = (clientX: number, clientY: number) => {
+    const ring = holdRing.current,
+      area = stage.current;
+    if (!ring || !area || !control.current) return;
+    const bounds = area.getBoundingClientRect();
+    ring.style.transform = `translate(${clientX - bounds.left}px, ${clientY - bounds.top}px)`;
+    ring.classList.remove("rs-hold-active", "rs-hold-fired");
+    void ring.offsetWidth; // restart the fill animation
+    ring.classList.add("rs-hold-active");
+  };
+  const endHold = (fired: boolean) => {
+    const ring = holdRing.current;
+    if (!ring) return;
+    ring.classList.remove("rs-hold-active");
+    if (fired) {
+      ring.classList.add("rs-hold-fired");
+      navigator.vibrate?.(18);
+    }
+  };
+  const gestureAction = (action: GestureAction) => {
+    if (action.kind === "zoom") {
+      zoomTo(
+        zoom.current.scale * action.factor,
+        action.originX,
+        action.originY,
+        action.panX,
+        action.panY,
+      );
+      return;
+    }
+    if (action.kind === "hold") return showHold(action.clientX, action.clientY);
+    if (action.kind === "holdEnd") return endHold(action.fired);
+    // Remote input keeps every existing gate: approved, live, unpaused, control enabled.
+    if (!canInput.current) {
+      if (action.kind === "up" && pressedButtons.current.has(action.button)) releaseAll();
+      return;
+    }
+    if (action.kind === "move") {
+      if (touchModeRef.current === "trackpad") {
+        placeCursor();
+        followCursor();
+      }
+      pendingMove.current = { x: action.x, y: action.y };
+      if (moveTimer.current !== null) return;
+      moveTimer.current = window.setTimeout(() => {
+        moveTimer.current = null;
+        if (canInput.current && pendingMove.current)
+          send({ type: "input", action: "move", ...pendingMove.current });
+        pendingMove.current = null;
+      }, 33);
+      return;
+    }
+    // Clicks and scrolls carry their own position, so a throttled move never lands after them.
+    if (moveTimer.current !== null) window.clearTimeout(moveTimer.current);
+    moveTimer.current = null;
+    pendingMove.current = null;
+    if (action.kind === "wheel") {
+      send({ type: "input", action: "wheel", x: action.x, y: action.y, deltaY: action.deltaY });
+      return;
+    }
+    if (action.kind === "down") {
+      pressedButtons.current.add(action.button);
+      send({ type: "input", action: "down", x: action.x, y: action.y, button: action.button });
+    } else if (pressedButtons.current.delete(action.button))
+      send({ type: "input", action: "up", x: action.x, y: action.y, button: action.button });
+  };
+  // The recognizer lives for the whole window; it always calls this render's handler.
+  const latestGestureAction = useRef(gestureAction);
+  latestGestureAction.current = gestureAction;
+  if (!gestures.current)
+    gestures.current = new TouchGestures(
+      (action) => latestGestureAction.current(action),
+      () => canvas.current?.getBoundingClientRect() ?? null,
+      touchMode,
+    );
+  const setTouchMode = (mode: TouchMode) => {
+    releaseAll();
+    setTouchModeState(mode);
+    if (gestures.current) gestures.current.mode = mode;
+    writePreference("rs-touch-mode", mode);
+  };
+  const touchPoint = (event: ReactPointerEvent<HTMLElement>) => ({
+    id: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    time: event.timeStamp,
+  });
+  const touchDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch" || !hasFrame || showOverlay) return;
+    event.preventDefault();
+    if (approved && control.current) {
+      // Keep the phone keyboard open while tapping the desktop; otherwise take focus for input.
+      if (document.activeElement !== ime.current) canvas.current?.focus({ preventScroll: true });
+      setFocused(true);
+      canInput.current = true;
+    }
+    gestures.current?.down(touchPoint(event));
+  };
+  const touchMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    gestures.current?.move(touchPoint(event));
+  };
+  const touchUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    gestures.current?.up(touchPoint(event));
+  };
+  const touchCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    gestures.current?.cancel();
+    gestures.current?.forget(event.pointerId);
+    if (pressedButtons.current.size) releaseAll();
+  };
+
+  useEffect(() => {
+    const query = window.matchMedia?.(touchLayoutQuery);
+    if (!query) return;
+    const changed = () => setTouchLayout(query.matches);
+    query.addEventListener?.("change", changed);
+    return () => query.removeEventListener?.("change", changed);
+  }, []);
+  // Keep the whole support window above a phone's on-screen keyboard.
+  useEffect(() => {
+    const visual = window.visualViewport;
+    if (!visual || !touchLayout) {
+      setViewport(null);
+      return;
+    }
+    const update = () => {
+      const keyboardShown = window.innerHeight - visual.height > 80;
+      setViewport(keyboardShown ? { height: visual.height, top: visual.offsetTop } : null);
+      window.setTimeout(placeCursor, 0);
+    };
+    update();
+    visual.addEventListener("resize", update);
+    visual.addEventListener("scroll", update);
+    return () => {
+      visual.removeEventListener("resize", update);
+      visual.removeEventListener("scroll", update);
+    };
+  }, [touchLayout]);
+  // iOS Safari zooms the whole page on pinch unless its own gesture events are cancelled.
+  useEffect(() => {
+    const area = stage.current;
+    if (!area) return;
+    const block = (event: Event) => event.preventDefault();
+    area.addEventListener("gesturestart", block);
+    area.addEventListener("gesturechange", block);
+    return () => {
+      area.removeEventListener("gesturestart", block);
+      area.removeEventListener("gesturechange", block);
+    };
+  }, []);
+  const toggleControl = () => {
+    if (controlEnabled) {
+      disableControl();
+      return;
+    }
+    if (!approved) return;
+    setControlEnabled(true);
+    control.current = true;
+    canvas.current?.focus({ preventScroll: true });
+    setFocused(true);
+    if (touchLayout && !readPreference("rs-touch-help-seen")) {
+      setHelpOpen(true);
+      writePreference("rs-touch-help-seen", "1");
+    }
+  };
   const stop = async () => {
     if (!session || stopping) return;
     stopped.current = true;
@@ -1009,9 +1504,21 @@ export function RemoteSupport() {
             : statusText;
 
   return (
-    <div className="rs-app">
+    <div
+      className={`rs-app ${touchLayout ? "rs-touch" : ""} ${keyboardOpen ? "rs-keyboard-open" : ""}`}
+      style={
+        viewport
+          ? { height: viewport.height, minHeight: 0, transform: `translateY(${viewport.top}px)` }
+          : undefined
+      }
+    >
       <header className="rs-header">
-        <a className="rs-brand" href="/" target="_blank" rel="noreferrer">
+        <a
+          className="rs-brand"
+          href="/"
+          target={touchLayout ? undefined : "_blank"}
+          rel="noreferrer"
+        >
           <span>
             <BookOpen size={21} />
           </span>
@@ -1095,15 +1602,7 @@ export function RemoteSupport() {
             type="button"
             className={`rs-control-toggle ${controlEnabled ? "rs-control-on" : ""}`}
             disabled={!approved}
-            onClick={() => {
-              if (controlEnabled) disableControl();
-              else {
-                setControlEnabled(true);
-                control.current = true;
-                canvas.current?.focus();
-                setFocused(true);
-              }
-            }}
+            onClick={toggleControl}
           >
             <MousePointer2 size={15} />
             {controlEnabled ? "Control enabled" : "Enable control"}
@@ -1238,8 +1737,12 @@ export function RemoteSupport() {
         </div>
       )}
       <div
-        className={`rs-stage ${scale === "actual" ? "rs-actual" : "rs-fit"} ${controlEnabled ? "rs-stage-control" : ""}`}
+        className={`rs-stage ${scale === "actual" ? "rs-actual" : "rs-fit"} ${controlEnabled ? "rs-stage-control" : ""} ${zoomScale > 1 ? "rs-zoomed" : ""}`}
         ref={stage}
+        onPointerDown={touchDown}
+        onPointerMove={touchMove}
+        onPointerUp={touchUp}
+        onPointerCancel={touchCancel}
       >
         <canvas
           ref={canvas}
@@ -1251,12 +1754,15 @@ export function RemoteSupport() {
           onPointerMove={move}
           onPointerDown={pointerDown}
           onPointerUp={pointerUp}
-          onPointerCancel={() => releaseAll()}
-          onLostPointerCapture={() => {
-            if (pressedButtons.current.size) releaseAll();
+          onPointerCancel={(event) => {
+            if (event.pointerType !== "touch") releaseAll();
+          }}
+          onLostPointerCapture={(event) => {
+            if (event.pointerType !== "touch" && pressedButtons.current.size) releaseAll();
           }}
           onContextMenu={(event) => {
-            if (controlEnabled) event.preventDefault();
+            // Phones raise the browser menu on a long press; that press is a right click here instead.
+            if (controlEnabled || touchLayout) event.preventDefault();
           }}
           onFocus={() => setFocused(true)}
           onBlur={() => {
@@ -1313,7 +1819,7 @@ export function RemoteSupport() {
               <a
                 className="rs-return"
                 href="/"
-                target="_blank"
+                target={touchLayout ? undefined : "_blank"}
                 rel="noreferrer"
               >
                 <ArrowLeft size={15} />
@@ -1346,7 +1852,303 @@ export function RemoteSupport() {
             Remote control on <span>·</span> Press <kbd>Esc</kbd> to release
           </div>
         )}
+        <div
+          ref={cursorDot}
+          className="rs-touch-cursor"
+          hidden={!(controlEnabled && ready && touchMode === "trackpad")}
+          aria-hidden="true"
+        >
+          <MousePointer2 size={20} />
+        </div>
+        <div ref={holdRing} className="rs-hold-ring" aria-hidden="true" />
+        {typingNote && (
+          <div className="rs-typing-note" role="status">
+            {typingNote}
+          </div>
+        )}
       </div>
+      <textarea
+        ref={ime}
+        className="rs-ime"
+        aria-label="Type on the remote computer"
+        autoCapitalize="off"
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
+        enterKeyHint="enter"
+        defaultValue={KEYBOARD_SENTINEL}
+        tabIndex={-1}
+        onInput={imeChanged}
+        onKeyDown={imeKeyDown}
+        onCompositionStart={() => {
+          composing.current = true;
+        }}
+        onCompositionEnd={() => {
+          composing.current = false;
+          imeChanged();
+        }}
+        onFocus={() => {
+          setKeyboardOpen(true);
+          setFocused(true);
+        }}
+        onBlur={() => {
+          setKeyboardOpen(false);
+          releaseAll();
+        }}
+      />
+      {touchLayout && !ended && (
+        <div className="rs-touch-controls">
+          {keyboardOpen && controlEnabled && (
+            <div className="rs-key-row" role="toolbar" aria-label="Special keys">
+              {modifierKeys.map((item) => (
+                <button
+                  key={item.code}
+                  type="button"
+                  className={`rs-key rs-key-modifier ${modifiers.includes(item.code) ? "rs-key-on" : ""}`}
+                  aria-pressed={modifiers.includes(item.code)}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => toggleModifier(item.code)}
+                >
+                  {item.label}
+                </button>
+              ))}
+              {(showFunctionKeys ? functionKeys : navigationKeys).map((item) => (
+                <button
+                  key={item.code}
+                  type="button"
+                  className="rs-key"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => pressKey(item.code)}
+                >
+                  {item.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`rs-key ${showFunctionKeys ? "rs-key-on" : ""}`}
+                aria-pressed={showFunctionKeys}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => setShowFunctionKeys((value) => !value)}
+              >
+                Fn
+              </button>
+            </div>
+          )}
+          <div className="rs-dock" role="toolbar" aria-label="Touch controls">
+            <button
+              type="button"
+              className={`rs-dock-button rs-dock-control ${controlEnabled ? "rs-dock-on" : ""}`}
+              disabled={!approved && !controlEnabled}
+              onClick={toggleControl}
+            >
+              <MousePointer2 size={18} />
+              <span>{controlEnabled ? "Control on" : approved ? "Control" : "View only"}</span>
+            </button>
+            <button
+              type="button"
+              className={`rs-dock-button ${keyboardOpen ? "rs-dock-on" : ""}`}
+              disabled={!controlEnabled || !ready}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => (keyboardOpen ? closeKeyboard() : openKeyboard())}
+            >
+              {keyboardOpen ? <KeyboardOff size={18} /> : <Keyboard size={18} />}
+              <span>Keyboard</span>
+            </button>
+            <button
+              type="button"
+              className="rs-dock-button"
+              onClick={() => setTouchMode(touchMode === "trackpad" ? "direct" : "trackpad")}
+              aria-label={`Pointer mode: ${touchMode === "trackpad" ? "trackpad" : "direct touch"}. Tap to switch.`}
+            >
+              {touchMode === "trackpad" ? <Touchpad size={18} /> : <Pointer size={18} />}
+              <span>{touchMode === "trackpad" ? "Trackpad" : "Touch"}</span>
+            </button>
+            <button
+              type="button"
+              className="rs-dock-button"
+              disabled={zoomScale <= 1}
+              onClick={() => applyZoom({ scale: 1, x: 0, y: 0 })}
+              aria-label="Reset zoom"
+            >
+              <Shrink size={18} />
+              <span>{zoomScale > 1 ? `${zoomScale.toFixed(1)}×` : "Fit"}</span>
+            </button>
+            <button
+              type="button"
+              className={`rs-dock-button ${moreOpen ? "rs-dock-on" : ""}`}
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((value) => !value)}
+            >
+              <Ellipsis size={18} />
+              <span>More</span>
+            </button>
+          </div>
+          {moreOpen && (
+            <div className="rs-sheet" role="dialog" aria-label="More remote support options">
+              <div className="rs-sheet-head">
+                <strong>Options</strong>
+                <button type="button" onClick={() => setMoreOpen(false)} aria-label="Close options">
+                  <X size={18} />
+                </button>
+              </div>
+              <button
+                type="button"
+                className="rs-sheet-row"
+                disabled={!canSecureAttention}
+                onClick={() => {
+                  sendSecureAttention();
+                  setMoreOpen(false);
+                }}
+              >
+                {secureAttentionPending ? <Loader2 size={16} className="spin" /> : <LockKeyhole size={16} />}
+                <span>
+                  Send Ctrl+Alt+Delete
+                  <small>
+                    {!secureAttentionAvailable
+                      ? "Unavailable on this computer"
+                      : !controlEnabled
+                        ? "Take control first"
+                        : "Opens the Windows security screen"}
+                  </small>
+                </span>
+              </button>
+              {displays.length > 1 && (
+                <label className="rs-sheet-row rs-sheet-select">
+                  <Monitor size={16} />
+                  <span>
+                    Monitor
+                    <select
+                      value={selectedDisplayId}
+                      disabled={!canSelectDisplay}
+                      onChange={(event) => {
+                        selectDisplay(event.target.value);
+                        setMoreOpen(false);
+                      }}
+                    >
+                      {displays.map((item, index) => (
+                        <option key={item.id} value={item.id}>
+                          {`Monitor ${index + 1}${item.isPrimary ? " (Primary)" : ""} · ${item.width} × ${item.height}`}
+                        </option>
+                      ))}
+                    </select>
+                  </span>
+                </label>
+              )}
+              <button
+                type="button"
+                className="rs-sheet-row"
+                onClick={() => {
+                  setMoreOpen(false);
+                  if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+                    void document.documentElement
+                      .requestFullscreen()
+                      .catch(() =>
+                        setError(
+                          "This browser does not allow full screen. On iPhone, use Share → Add to Home Screen for a full-screen app.",
+                        ),
+                      );
+                  else if (document.fullscreenElement) void document.exitFullscreen();
+                  else
+                    setError(
+                      "This browser does not allow full screen. On iPhone, use Share → Add to Home Screen for a full-screen app.",
+                    );
+                }}
+              >
+                <Maximize2 size={16} />
+                <span>
+                  Full screen
+                  <small>Hide the browser bars</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="rs-sheet-row"
+                onClick={() => {
+                  setMoreOpen(false);
+                  setHelpOpen(true);
+                }}
+              >
+                <CircleHelp size={16} />
+                <span>
+                  Touch gestures
+                  <small>How to click, right-click, drag, scroll and zoom</small>
+                </span>
+              </button>
+              <p className="rs-sheet-status">
+                <Signal size={12} />
+                {connected ? "Secure relay connected" : "Relay disconnected"}
+                {hasFrame && fps > 0 ? ` · ${fps} fps` : ""}
+                {display.width > 0 ? ` · ${display.width} × ${display.height}` : ""}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+      {helpOpen && (
+        <div className="rs-help-backdrop" onClick={() => setHelpOpen(false)}>
+          <div
+            className="rs-help"
+            role="dialog"
+            aria-label="Touch gestures"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="rs-sheet-head">
+              <strong>Touch gestures</strong>
+              <button type="button" onClick={() => setHelpOpen(false)} aria-label="Close help">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="rs-help-mode">
+              {touchMode === "trackpad"
+                ? "Trackpad mode: drag one finger anywhere to move the pointer, like a laptop trackpad."
+                : "Touch mode: the pointer goes wherever you touch the screen."}
+            </p>
+            <ul>
+              <li>
+                <b>Tap</b>
+                <span>{touchMode === "trackpad" ? "Left click at the pointer" : "Left click where you tap"}</span>
+              </li>
+              <li>
+                <b>Double tap</b>
+                <span>Double click</span>
+              </li>
+              <li>
+                <b>Press and hold</b>
+                <span>Right click (lift when the ring fills)</span>
+              </li>
+              <li>
+                <b>Hold, then move</b>
+                <span>Drag with the left button held</span>
+              </li>
+              {touchMode === "direct" && (
+                <li>
+                  <b>Drag one finger</b>
+                  <span>Drag (select text, move windows)</span>
+                </li>
+              )}
+              <li>
+                <b>Two-finger tap</b>
+                <span>Right click</span>
+              </li>
+              <li>
+                <b>Two-finger drag</b>
+                <span>Scroll</span>
+              </li>
+              <li>
+                <b>Pinch</b>
+                <span>Zoom in to see small text; Fit zooms back out</span>
+              </li>
+            </ul>
+            <p className="rs-help-foot">
+              Keyboard opens your phone’s keyboard. Its key row adds Esc, Tab, arrows, F-keys and one-shot Ctrl, Alt,
+              Shift and Win: tap Ctrl, then a letter, for shortcuts like Ctrl+C.
+            </p>
+            <button type="button" className="rs-help-done" onClick={() => setHelpOpen(false)}>
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
       <footer className="rs-footer">
         <span>
           <span

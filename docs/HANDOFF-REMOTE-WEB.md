@@ -57,3 +57,11 @@ Coordinator completed synthetic admin-policy save/bypass and CAD-denial feedback
 ## 2026-11-05 — agent/companion 0.1.11 supersedes parts of this handoff
 
 See ARCHITECTURE.md → Remote support (Takeover, Screen helper + notice, Frames) and API.md "Agent 0.1.11+". Capture and input now run in a SYSTEM screen helper that follows the input desktop (Ctrl+Alt+Delete, lock, sign-in, UAC stay visible and controllable); the user-session companion is notice/indicator/hotkey only; frames are acknowledged RMF1 delta frames; a new session for an endpoint ends the open one (`replaced_by_new_session`). Statements below about 1600 px/3 fps whole JPEGs, pausing on secure desktops or one session per endpoint returning 409 describe agents up to 0.1.10.
+
+## 2026-11-14 — Phones and tablets
+
+- Touch pointers are handled on the stage by `TouchGestures` (`supportTouch.ts`). Mouse and pen pointers keep the canvas handlers above. The recognizer emits `move/down/up/wheel` in normalized coordinates plus local `zoom` and hold-feedback actions. `RemoteSupport` sends remote actions only when `canInput` holds (active, approved, live, unpaused, control enabled), exactly like mouse input. Pinch zoom transforms the canvas in place (origin 0 0), so `getBoundingClientRect` mapping stays exact at any zoom. Zoom works in view-only mode too.
+- Phone typing goes through the hidden `.rs-ime` text box: `diffText` → `textToStrokes` (US layout) → `strokesToMessages`, paced by `pumpKeys` (8 events per 40 ms). `releaseAll` clears the queue. One-shot modifiers from the key row wrap the next stroke run and are always released. Hardware keyboards: shortcuts and non-text keys go through `imeKeyDown`, and Escape still disables control.
+- Touch layout (`.rs-touch`, from `(pointer: coarse), (max-width: 760px), (max-height: 480px)`) hides the desktop toolbar, security note and footer, and shows the dock and options sheet. The consent bar with the emergency shortcut stays.
+- `openRemoteSupport` navigates the same tab on coarse pointers and in standalone display mode, so the installed app keeps its sign-in. Desktop browsers still get the popup.
+- Not verified on a real device; see PROGRESS.md 2026-11-14.
