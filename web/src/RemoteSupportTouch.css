@@ -1,0 +1,501 @@
+/* Remote support on phones and tablets: gestures, on-screen keyboard, dock and readable sizes. */
+.rs-app {
+  position: relative;
+}
+.rs-desktop {
+  transform-origin: 0 0;
+}
+.rs-stage {
+  touch-action: none;
+}
+.rs-stage.rs-zoomed {
+  overflow: hidden;
+}
+.rs-stage.rs-zoomed .rs-desktop {
+  will-change: transform;
+}
+.rs-touch-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  margin: -3px 0 0 -3px;
+  color: #fff;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px #000) drop-shadow(0 1px 2px #000a);
+}
+.rs-touch-cursor[hidden] {
+  display: none;
+}
+.rs-touch-cursor svg {
+  fill: #fff;
+  stroke: #10272d;
+  stroke-width: 1.6;
+}
+.rs-hold-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 64px;
+  height: 64px;
+  margin: -32px 0 0 -32px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  border: 3px solid #8fe0c4;
+  box-shadow:
+    0 0 0 1px #0007,
+    inset 0 0 0 1px #0007;
+}
+.rs-hold-ring.rs-hold-active {
+  animation: rs-hold 550ms linear forwards;
+}
+.rs-hold-ring.rs-hold-fired {
+  animation: rs-hold-fired 380ms ease-out forwards;
+}
+@keyframes rs-hold {
+  0%,
+  25% {
+    opacity: 0;
+    scale: 0.35;
+  }
+  100% {
+    opacity: 0.95;
+    scale: 1;
+  }
+}
+@keyframes rs-hold-fired {
+  0% {
+    opacity: 1;
+    scale: 1;
+    background: #8fe0c455;
+  }
+  100% {
+    opacity: 0;
+    scale: 1.35;
+    background: #8fe0c400;
+  }
+}
+.rs-typing-note {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  max-width: calc(100% - 32px);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #423a2fee;
+  border: 1px solid #5b4d38;
+  color: #e6d2b0;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+.rs-ime {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  /* 16px stops iOS from zooming the page when the field takes focus. */
+  font-size: 16px;
+  pointer-events: none;
+}
+.rs-touch-controls {
+  position: relative;
+  flex-shrink: 0;
+  background: #112d33;
+  border-top: 1px solid #2b454b;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  font-size: 12px;
+}
+.rs-key-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid #23403f;
+  touch-action: pan-x;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.rs-key-row::-webkit-scrollbar {
+  display: none;
+}
+.rs-key {
+  flex-shrink: 0;
+  min-width: 46px;
+  height: 40px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid #3c5b5f;
+  background: #23434a;
+  color: #d6e8e2;
+  font-size: 14px !important;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+.rs-key:active {
+  background: #33606a;
+}
+.rs-key-modifier {
+  background: #1b363c;
+  color: #a9c8c2;
+}
+.rs-key.rs-key-on {
+  background: #5fb698;
+  border-color: #8fe0c4;
+  color: #0e2a26;
+}
+.rs-dock {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  padding: 6px 6px 8px;
+}
+.rs-dock-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 54px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #a9c4c3;
+  font-size: 11px !important;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+.rs-dock-button > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rs-dock-button:active:not(:disabled) {
+  background: #23434a;
+}
+.rs-dock-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.rs-dock-button.rs-dock-on {
+  background: #23463f;
+  color: #a8ecd2;
+}
+.rs-dock-control.rs-dock-on {
+  background: #2f6a58;
+  color: #e4fff4;
+}
+.rs-sheet {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 8px);
+  z-index: 10;
+  max-height: 70dvh;
+  overflow: auto;
+  padding: 6px 6px 10px;
+  border-radius: 14px;
+  background: #163238;
+  border: 1px solid #335157;
+  box-shadow: 0 12px 40px #000a;
+}
+.rs-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 6px;
+  color: #e2eeea;
+  font-size: 15px;
+}
+.rs-sheet-head > button {
+  display: flex;
+  border: 0;
+  background: transparent;
+  color: #9db9b8;
+  padding: 6px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.rs-sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #d4e5e0;
+  font-size: 14px !important;
+  text-align: left;
+  cursor: pointer;
+}
+.rs-sheet-row:active:not(:disabled) {
+  background: #23434a;
+}
+.rs-sheet-row:disabled {
+  opacity: 0.4;
+}
+.rs-sheet-row > svg {
+  flex-shrink: 0;
+  color: #8fc9b4;
+}
+.rs-sheet-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.rs-sheet-row small {
+  font-size: 12px;
+  color: #7f9d9b;
+}
+.rs-sheet-select select {
+  margin-top: 4px;
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #3c5b5f;
+  background: #1b363c;
+  color: #d4e5e0;
+  font-size: 14px !important;
+}
+.rs-sheet-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 12px 0;
+  color: #6f8f90;
+  font-size: 11px;
+}
+.rs-help-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+  background: #050f12b0;
+}
+.rs-help {
+  width: 100%;
+  max-width: 440px;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 8px 8px 14px;
+  border-radius: 16px;
+  background: #163238;
+  border: 1px solid #335157;
+  box-shadow: 0 12px 40px #000a;
+  color: #c9dbd7;
+  font-size: 14px;
+}
+.rs-help-mode,
+.rs-help-foot {
+  margin: 4px 10px 10px;
+  line-height: 1.5;
+  color: #9fbbb7;
+  font-size: 13px;
+}
+.rs-help ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px;
+}
+.rs-help li {
+  display: grid;
+  grid-template-columns: 9.5em 1fr;
+  gap: 10px;
+  padding: 9px 6px;
+  border-top: 1px solid #24403f;
+  line-height: 1.35;
+}
+.rs-help li b {
+  color: #e2f1ec;
+  font-weight: 600;
+}
+.rs-help-done {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 4px 10px 0;
+  min-height: 46px;
+  border: 0;
+  border-radius: 10px;
+  background: #5fb698;
+  color: #0e2a26;
+  font-size: 15px !important;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Touch layout: the dock replaces the desktop toolbar, and text is sized for reading on a phone. */
+.rs-touch .rs-toolbar,
+.rs-touch .rs-security-note,
+.rs-touch .rs-footer,
+.rs-touch .rs-control-hint {
+  display: none;
+}
+.rs-touch .rs-stage {
+  padding: 4px;
+}
+.rs-touch .rs-header {
+  height: auto;
+  min-height: 0;
+  padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top, 0px));
+  gap: 8px 10px;
+  flex-wrap: nowrap;
+}
+.rs-touch .rs-brand strong,
+.rs-touch .rs-brand > small {
+  display: none;
+}
+.rs-touch .rs-brand > span {
+  width: 32px;
+  height: 32px;
+}
+.rs-touch .rs-header-center {
+  order: 0;
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: flex-start;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.rs-touch .rs-header-center > svg {
+  display: none;
+}
+.rs-touch .rs-header-center > strong {
+  max-width: 100%;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rs-touch .rs-status {
+  margin-left: 0;
+  font-size: 11px;
+}
+.rs-touch .rs-header-actions {
+  margin-left: 0;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.rs-touch .rs-timer {
+  font-size: 12px;
+}
+.rs-touch .rs-stop {
+  font-size: 13px !important;
+  min-height: 38px;
+  padding: 8px 12px;
+}
+.rs-touch .rs-consent-bar {
+  padding: 7px 12px;
+  gap: 8px;
+}
+.rs-touch .rs-consent-bar > span {
+  font-size: 11px;
+  line-height: 1.45;
+}
+.rs-touch .rs-error,
+.rs-touch .rs-sas-feedback {
+  font-size: 13px;
+  padding: 10px 12px;
+}
+.rs-touch .rs-placeholder > h1 {
+  font-size: 20px;
+}
+.rs-touch .rs-placeholder > p {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.rs-touch .rs-placeholder-guardrails > span,
+.rs-touch .rs-eyebrow {
+  font-size: 10px;
+}
+.rs-touch .rs-return {
+  font-size: 14px;
+  padding: 11px 16px;
+}
+/* With the on-screen keyboard up, space goes to the desktop and the keys; the sharing notice shrinks to one line. */
+.rs-touch.rs-keyboard-open .rs-timer {
+  display: none;
+}
+.rs-touch.rs-keyboard-open .rs-consent-bar > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Landscape phones: a slimmer header and dock so the desktop gets the height. */
+@media (orientation: landscape) and (max-height: 520px) {
+  .rs-touch .rs-header {
+    padding-block: 4px;
+  }
+  .rs-touch .rs-brand {
+    display: none;
+  }
+  .rs-touch .rs-header-center {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+  }
+  .rs-touch .rs-stop {
+    min-height: 32px;
+    padding: 5px 10px;
+  }
+  .rs-touch .rs-consent-bar {
+    padding-block: 4px;
+  }
+  .rs-touch .rs-consent-bar > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rs-touch .rs-dock {
+    padding: 2px 6px 4px;
+  }
+  .rs-touch .rs-dock-button {
+    flex-direction: row;
+    min-height: 38px;
+    gap: 6px;
+  }
+  .rs-touch .rs-key-row {
+    padding-block: 5px;
+  }
+  .rs-touch .rs-key {
+    height: 34px;
+  }
+}
+@media (max-width: 420px) {
+  .rs-touch .rs-timer {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rs-hold-ring.rs-hold-active {
+    animation-duration: 1ms;
+    animation-delay: 540ms;
+  }
+}
