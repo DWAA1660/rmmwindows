@@ -11,10 +11,13 @@ const parse = value => { try { return JSON.parse(value); } catch { return {}; } 
 // grants each immutable command once and stores output through ordinary jobs.
 export function mountTerminal({ db, audit, fail, str, insertJob, jobView, getJob, validationIntervalMs = 5000 }) {
   let stopped = false;
+  // Volatile, command-scoped replies: consume before sending, never replay.
+  const inputs = new Map();
   const get = id => db.prepare('SELECT t.*,e.display_name endpoint_name FROM terminal_sessions t JOIN endpoints e ON e.id=t.endpoint_id WHERE t.id=?').get(id);
   const view = row => ({ id: row.id, endpointId: row.endpoint_id, endpointName: row.endpoint_name, operatorName: row.operator_name,
     status: row.status, workingDirectory: row.working_directory, expiresAt: row.expires_at, createdAt: row.created_at,
-    closedAt: row.closed_at, reason: row.close_reason });
+    closedAt: row.closed_at, reason: row.close_reason,
+    inputJobId: inputs.get(row.id)?.jobId ?? null });
   const id = (value, name) => { if (typeof value !== 'string' || !uuid.test(value)) fail(400, `${name} must be a UUID.`); return value; };
   const exact = (body, fields) => { if (Object.keys(body).some(key => !fields.includes(key))) fail(400, 'Unexpected terminal request field.'); };
   const requireRole = req => { if (!roles.has(req.operator.role)) fail(403, 'Terminal sessions require an operator account.'); };
@@ -26,6 +29,7 @@ export function mountTerminal({ db, audit, fail, str, insertJob, jobView, getJob
   };
 
   function close(sessionId, reason, actor = 'terminal') {
+    inputs.delete(sessionId);
     const current = get(sessionId);
     if (!current || current.status !== 'open') return current;
     transaction(db, () => {
@@ -137,9 +141,40 @@ export function mountTerminal({ db, audit, fail, str, insertJob, jobView, getJob
       const row = owned(req); exact(req.body, []);
       res.json(view(close(row.id, 'operator_closed', req.operator.username)));
     });
+    router.post('/terminals/:id/input', (req, res) => {
+      const row = owned(req); exact(req.body, ['jobId', 'inputId', 'text']);
+      if (row.status !== 'open') fail(409, 'Terminal is closed.');
+      runningCommand(row, req.body.jobId);
+      const inputId = id(req.body.inputId, 'inputId');
+      const text = req.body.text;
+      if (typeof text !== 'string' || text.length > 4096 || /[\r\n\0]/.test(text)) fail(400, 'Reply must be one line of at most 4096 characters.');
+      const state = inputs.get(row.id);
+      if (!state || state.jobId !== req.body.jobId) fail(409, 'This agent is not accepting replies for this command. Upgrade the agent if needed.');
+      if (state.seen.has(inputId)) fail(409, 'This reply was already submitted; it will not be sent again.');
+      if (state.pending && state.pending.expiresAt > Date.now()) fail(409, 'Wait for the previous reply to be collected.');
+      if (state.seen.size >= 256) fail(409, 'Reply limit reached for this command.');
+      state.seen.add(inputId);
+      state.pending = { text, expiresAt: Date.now() + 10000 };
+      audit(req.operator.username, 'terminal.input.submitted', row.id, { jobId: state.jobId, inputId });
+      res.status(202).json({ accepted: true });
+    });
   }
 
   function mountAgent(router) {
+    router.post('/terminals/:id/input', (req, res) => {
+      exact(req.body, ['instanceId', 'jobId']);
+      const row = agentOwned(req);
+      if (!valid(row)) fail(409, 'Terminal is closed.');
+      const command = runningCommand(row, req.body.jobId);
+      if (row.instance_id !== id(req.body.instanceId, 'instanceId') || !command.authorized_at) fail(409, 'Terminal process ownership is not authorized.');
+      let state = inputs.get(row.id);
+      if (!state || state.jobId !== req.body.jobId) {
+        state = { jobId: req.body.jobId, pending: null, seen: new Set() };
+        inputs.set(row.id, state);
+      }
+      const pending = state.pending; state.pending = null;
+      res.json({ text: pending && pending.expiresAt > Date.now() ? pending.text : null });
+    });
     router.post('/terminals/validate', (req, res) => {
       exact(req.body, ['instanceId', 'sessionIds']);
       const instanceId = id(req.body.instanceId, 'instanceId'); const ids = req.body.sessionIds;
@@ -182,6 +217,7 @@ export function mountTerminal({ db, audit, fail, str, insertJob, jobView, getJob
       // this never authorizes input or execution. Open updates still need running.
       const command = runningCommand(row, req.body.jobId, req.body.status === 'open');
       if (row.instance_id !== instanceId || !command.authorized_at) fail(409, 'Terminal process ownership is not authorized.');
+      inputs.delete(row.id);
       if (req.body.workingDirectory !== undefined) {
         const directory = req.body.workingDirectory === null ? null : str(req.body.workingDirectory, 'workingDirectory', { min: 0, max: 4096 });
         db.prepare('UPDATE terminal_sessions SET working_directory=? WHERE id=?').run(directory, row.id);

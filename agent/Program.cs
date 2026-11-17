@@ -21,6 +21,12 @@ if (args.Length >= 1 && (args[0] == "--self-test-buffered-progress" || args[0].S
     return;
 }
 
+if (args.Contains("--self-test-terminal", StringComparer.Ordinal))
+{
+    await TerminalSelfTests.RunAsync();
+    return;
+}
+
 if (args.Contains("--self-test", StringComparer.Ordinal))
 {
     Environment.ExitCode = await AgentSelfTests.RunAsync();

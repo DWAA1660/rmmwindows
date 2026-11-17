@@ -48,6 +48,51 @@ async function fixture(t, databasePath = ':memory:') {
   return { ...service, stop, request, login, admin, enroll, create, command, start, authorize, validate, complete, password };
 }
 
+test('live replies are login/endpoint/instance/job scoped and consumed once without replay or audit content', async t => {
+  const f = await fixture(t); const endpoint = await f.enroll('0.1.15'); const stranger = await f.enroll();
+  const terminal = (await f.create(endpoint)).data;
+  await f.command(terminal); const job = await f.start(endpoint); const instanceId = randomUUID();
+  const take = (device = endpoint, instance = instanceId, jobId = job.id) => f.request(`/agent/terminals/${terminal.id}/input`, 'POST', { instanceId: instance, jobId }, device.auth);
+  const inputId = randomUUID();
+  const send = (text = 'Y', id = inputId, session = f.admin, jobId = job.id) => f.request(`/terminals/${terminal.id}/input`, 'POST', { jobId, inputId: id, text }, session);
+  assert.equal((await take()).status, 409, 'no terminal start grant');
+  assert.equal((await f.authorize(endpoint, terminal, job, instanceId)).status, 200);
+  assert.equal((await send()).status, 409, 'old/nonpolling agent cannot accept input');
+  assert.equal((await take(stranger)).status, 404);
+  assert.equal((await take(endpoint, randomUUID())).status, 409);
+  assert.equal((await take()).data.text, null);
+  assert.equal((await f.request(`/terminals/${terminal.id}`, 'GET', undefined, f.admin)).data.inputJobId, job.id);
+  assert.equal((await send('Y', randomUUID(), { Cookie: f.admin.Cookie })).status, 403, 'CSRF required');
+  assert.equal((await send('Y', randomUUID(), await f.login())).status, 404, 'second login cannot send input');
+  assert.equal((await send('a\nb')).status, 400);
+  assert.equal((await send('a\0b')).status, 400);
+  assert.equal((await send('x'.repeat(4097))).status, 400);
+  assert.equal((await send('synthetic-private-answer')).status, 202);
+  assert.equal((await send('another', randomUUID())).status, 409, 'one pending line at a time');
+  assert.equal((await take()).data.text, 'synthetic-private-answer');
+  assert.equal((await take()).data.text, null, 'lost response cannot replay the reply');
+  assert.equal((await send()).status, 409, 'duplicate input ID cannot send again');
+  assert.equal((await send('', randomUUID())).status, 202);
+  assert.equal((await take()).data.text, '', 'blank replies are preserved');
+  assert.equal((await send('expired-answer', randomUUID())).status, 202);
+  const now = Date.now(); const shifted = t.mock.method(Date, 'now', () => now + 11000);
+  try { assert.equal((await take()).data.text, null, 'uncollected replies expire after ten seconds'); }
+  finally { shifted.mock.restore(); }
+  assert.equal((await send('stale-answer', randomUUID())).status, 202);
+  assert.equal((await f.complete(endpoint, job)).status, 200);
+  assert.equal((await take()).status, 409);
+  assert.equal((await send('late', randomUUID())).status, 409);
+  await f.command(terminal); const next = await f.start(endpoint);
+  assert.equal((await f.authorize(endpoint, terminal, next, instanceId)).status, 200);
+  assert.equal((await take(endpoint, instanceId, next.id)).data.text, null, 'old command reply cannot reach a new command');
+  assert.equal((await send('new', randomUUID(), f.admin, next.id)).status, 202);
+  await f.request(`/terminals/${terminal.id}/close`, 'POST', {}, f.admin);
+  assert.equal((await take(endpoint, instanceId, next.id)).status, 409);
+  const audit = JSON.stringify(f.db.prepare("SELECT details FROM audit WHERE action LIKE 'terminal.%'").all());
+  assert.equal(audit.includes('synthetic-private-answer'), false);
+  assert.equal(audit.includes('stale-answer'), false);
+});
+
 test('terminals enforce role, origin, original-login ownership, minimum agent and four-session cap', async t => {
   const f = await fixture(t); const endpoint = await f.enroll(); const otherEndpoint = await f.enroll();
   assert.equal((await f.create(endpoint, {})).status, 401);

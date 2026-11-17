@@ -130,6 +130,40 @@ try {
   assert.equal(full, chunks.map(c => c.text).join(''));
   console.log(`PASS real .NET 10 Windows agent/API: ${Buffer.byteLength(expected)} UTF-8 stdout bytes, stderr, ${chunks.length} chunks, full download, no redispatch.`);
 
+  {
+    phase('Terminal: real Read-Host/native stdin prompts, Unicode and blank replies.');
+    const terminal = await api('/terminals', { method: 'POST', body: { endpointId: enrolled.endpointId, idempotencyKey: randomUUID() } });
+    const interactive = await api(`/terminals/${terminal.id}/commands`, { method: 'POST', body: {
+      command: "$first=Read-Host 'First reply'; \"first=$first\"; cmd /d /v:on /c 'set /p answer=Native-reply? & echo native=!answer!'; $blank=Read-Host 'Blank reply'; \"blank=$($blank.Length)\"",
+      timeoutSeconds: 60, idempotencyKey: randomUUID()
+    } });
+    async function terminalOutput(jobId) {
+      let cursor = -1, more = true, text = '';
+      while (more) {
+        const page = await api(`/jobs/${jobId}/output?after=${cursor}&limit=200`);
+        text += page.chunks.map(chunk => chunk.text).join('');
+        cursor = page.nextCursor; more = page.hasMore;
+      }
+      return text;
+  }
+  for (const [prompt, text] of [['First reply:', 'Zoë 中文🙂'], ['Native-reply?', 'Y'], ['Blank reply:', '']]) {
+    await waitFor(prompt, async () => {
+      const snapshot = await api(`/terminals/${terminal.id}`);
+      return snapshot.inputJobId === interactive.id && (await terminalOutput(interactive.id)).includes(prompt);
+    }, 30000);
+    await api(`/terminals/${terminal.id}/input`, { method: 'POST', body: { jobId: interactive.id, inputId: randomUUID(), text } });
+  }
+  const interactiveDone = await waitFor('interactive command completion', async () => {
+    const current = await api(`/jobs/${interactive.id}`);
+    return ['succeeded', 'failed', 'interrupted'].includes(current.status) ? current : null;
+  }, 30000);
+  assert.equal(interactiveDone.status, 'succeeded', interactiveDone.summary);
+  const interactiveText = await terminalOutput(interactive.id);
+  assert.ok(interactiveText.includes('first=Zoë 中文🙂') && interactiveText.includes('native=Y') && interactiveText.includes('blank=0'), interactiveText);
+  await api(`/terminals/${terminal.id}/close`, { method: 'POST', body: {} });
+  phase('Terminal replies passed through browser API, agent polling and real PowerShell/native stdin.');
+  }
+
   // Remote file explorer: list, mkdir/copy/delete and a multi-chunk download, all inside this
   // test's temp folder. The long-poll claim should start each job within a moment.
   phase('File explorer: list, change and download files in the isolated temp folder.');

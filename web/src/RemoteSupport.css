@@ -426,6 +426,18 @@
 .rs-return:hover {
   background: #365644;
 }
+.rs-reconnect {
+  cursor: pointer;
+  min-height: 44px;
+  font-weight: 600 !important;
+}
+.rs-reconnect:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.rs-reconnect + .rs-return {
+  margin-top: 12px;
+}
 .rs-control-hint {
   position: absolute;
   z-index: 2;

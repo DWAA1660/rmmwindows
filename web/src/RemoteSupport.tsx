@@ -21,6 +21,7 @@ import {
   MousePointer2,
   Pointer,
   Power,
+  RotateCw,
   ShieldCheck,
   Shrink,
   Signal,
@@ -233,6 +234,8 @@ export function RemoteSupport() {
   const [userName, setUserName] = useState("");
   const [connecting, setConnecting] = useState(true),
     [connected, setConnected] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const reconnectStarted = useRef(false);
   const [error, setError] = useState(""),
     [paused, setPaused] = useState(false),
     [pauseReason, setPauseReason] = useState("");
@@ -738,7 +741,7 @@ export function RemoteSupport() {
         ws.onerror = () => {
           if (!disposed.current)
             setError(
-              "The secure desktop stream could not connect. End this session and start a new one from the workspace.",
+              "The secure desktop stream could not connect. Use Reconnect to start a new session.",
             );
         };
         ws.onclose = () => {
@@ -763,7 +766,7 @@ export function RemoteSupport() {
           clearFrame();
           if (!terminal(currentSession.current?.status) && !stopped.current)
             setError(
-              "The support connection closed. Control is released; this window will not reconnect automatically.",
+              "The support connection closed. Control is released. Use Reconnect to start a new session.",
             );
           // A relay that refuses an already-ended session closes before any state arrives.
           // Once the server confirms the end, its reason replaces the generic banner.
@@ -1480,17 +1483,32 @@ export function RemoteSupport() {
                   : connecting
                     ? "Opening secure session"
                     : "Unable to open session";
-  const initialWait =
-    connecting ||
-    switchingDisplay ||
-    ["requested", "awaiting_consent"].includes(session?.status || "");
   const ended = terminal(session?.status) || localStopped;
+  const reconnectEndpointId = session?.endpointId || new URLSearchParams(window.location.search).get("endpointId");
+  const canReconnect = !!reconnectEndpointId && (ended || (!connecting && !connected));
+  const reconnect = () => {
+    if (!canReconnect || stopping || reconnectStarted.current) return;
+    reconnectStarted.current = true;
+    setReconnecting(true);
+    disableControl();
+    clearFrame();
+    // Reuse the normal new-session flow in this window. A full navigation resets
+    // all input/frame state and creates fresh authorization, never resuming a consumed launch.
+    window.location.replace(
+      `/support/new?endpointId=${encodeURIComponent(reconnectEndpointId!)}`,
+    );
+  };
+  const initialWait =
+    !canReconnect &&
+    (connecting ||
+      switchingDisplay ||
+      ["requested", "awaiting_consent"].includes(session?.status || ""));
   const endReason = terminal(session?.status) ? supportEndReason(session) : "";
   // Set by the agent's SYSTEM screen helper when nobody was signed in, or the computer was locked, at the start.
   const signInScreen =
     session?.consentUser === "Windows sign-in screen" ||
     session?.consentUser === "Windows lock screen";
-  const showOverlay = !hasFrame || paused || stale || ended || switchingDisplay;
+  const showOverlay = !hasFrame || paused || stale || ended || switchingDisplay || canReconnect;
   const overlayTitle = ended
     ? statusText
     : switchingDisplay
@@ -1791,7 +1809,9 @@ export function RemoteSupport() {
             <h1>{overlayTitle}</h1>
             <p>
               {ended
-                ? `${endReason ? endReason + " " : ""}The desktop is hidden and remote input is disabled. Start a new session from the endpoint if more help is needed.`
+                ? `${endReason ? endReason + " " : ""}The desktop is hidden and remote input is disabled. Use Reconnect to start a new session with this computer.`
+                : canReconnect
+                  ? "The connection is closed and remote input is disabled. Use Reconnect to start a new session with this computer."
                 : switchingDisplay
                   ? "The previous image is cleared and remote input is released. Viewing resumes only after the selected monitor is confirmed and sends a fresh frame. Enable control again when you are ready."
                   : paused
@@ -1815,6 +1835,21 @@ export function RemoteSupport() {
                             ? "The support companion is connected. The live desktop will appear as soon as it sends a frame."
                             : "This window connects only to the selected endpoint using its session access policy."}
             </p>
+            {canReconnect && (
+              <button
+                type="button"
+                className="rs-return rs-reconnect"
+                disabled={reconnecting || stopping}
+                onClick={reconnect}
+              >
+                {reconnecting ? (
+                  <Loader2 size={15} className="spin" />
+                ) : (
+                  <RotateCw size={15} />
+                )}
+                {reconnecting ? "Reconnecting…" : "Reconnect"}
+              </button>
+            )}
             {ended && (
               <a
                 className="rs-return"
