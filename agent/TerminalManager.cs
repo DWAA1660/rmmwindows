@@ -60,7 +60,12 @@ public sealed class TerminalManager(AgentConfiguration configuration, AgentApi a
             lock (sync) { entry.Executing = true; entry.LastJob = job.Id; }
             if (expiresAt <= DateTimeOffset.UtcNow) throw new IOException("Terminal expired during process startup; no command was submitted.");
             var seconds = Math.Min(timeout, Math.Max(1, (int)(expiresAt - DateTimeOffset.UtcNow).TotalSeconds));
-            var result = await entry.Shell.ExecuteAsync(script, output, seconds, serviceStopping);
+            using var inputStopping = CancellationTokenSource.CreateLinkedTokenSource(serviceStopping);
+            var execution = entry.Shell.ExecuteAsync(script, output, seconds, serviceStopping);
+            var input = PumpInputAsync(entry.Shell, sessionId!, job.Id, inputStopping.Token);
+            (ProcessResult Result, string? WorkingDirectory) result;
+            try { result = await execution; }
+            finally { await inputStopping.CancelAsync(); await input; }
             await api.SendAsync<JsonElement>(HttpMethod.Post, $"terminals/{sessionId}/state", new
             {
                 jobId = job.Id, instanceId, status = entry.Shell.Ended ? "closed" : "open", workingDirectory = result.WorkingDirectory
@@ -85,6 +90,35 @@ public sealed class TerminalManager(AgentConfiguration configuration, AgentApi a
                 }
             }
         }
+    }
+    private async Task PumpInputAsync(TerminalShell shell, string sessionId, string jobId, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                if (shell.AcceptingInput)
+                {
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(3));
+                    try
+                    {
+                        // Each response is consumed on the server before delivery. Retrying
+                        // an empty poll cannot replay input, even after a lost acknowledgment.
+                        var reply = await api.SendAsync<JsonElement>(HttpMethod.Post, $"terminals/{sessionId}/input", new { instanceId, jobId }, deadline.Token);
+                        if (reply.GetProperty("text").ValueKind == JsonValueKind.String)
+                            await shell.WriteInputAsync(reply.GetProperty("text").GetString()!, deadline.Token);
+                    }
+                    catch (AgentApiException ex) when (ex.StatusCode == 404) { return; } // Older servers have no reply route.
+                    catch (AgentApiException ex) when (ex.StatusCode is 401 or 403 or 409) { shell.End(); return; }
+                    catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or AgentApiException)
+                    { if (ct.IsCancellationRequested) return; /* Discard ambiguous replies. Guardian checks authority independently. */ }
+                }
+                await Task.Delay(500, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (IOException) { shell.End(); } // A broken input pipe cannot safely continue.
     }
     private async Task GuardAsync(CancellationToken ct)
     {

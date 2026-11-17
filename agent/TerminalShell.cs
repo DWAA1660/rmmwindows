@@ -21,6 +21,9 @@ internal sealed class TerminalShell : IDisposable
     // on a startup race (the job is assigned just after Process.Start), Windows' console host.
     private HashSet<int> baseline = [];
     private bool ended;
+    private volatile bool inputOpen;
+    private readonly SemaphoreSlim inputLock = new(1, 1);
+    public bool AcceptingInput => inputOpen && !Ended;
     public bool Ended => ended || process.HasExited;
     private TerminalShell(Process process, NamedPipeServerStream pipe, TerminalProcessJob processJob)
     {
@@ -40,6 +43,7 @@ internal sealed class TerminalShell : IDisposable
         {
             UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
             WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System)
         };
         foreach (var arg in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", wrapper }) start.ArgumentList.Add(arg);
@@ -48,7 +52,7 @@ internal sealed class TerminalShell : IDisposable
         try
         {
             if (!process.Start()) throw new IOException("PowerShell did not start.");
-            process.StandardInput.Close(); // Native stdin prompts receive EOF; Read-Host fails explicitly.
+            process.StandardInput.AutoFlush = true;
             job = new TerminalProcessJob(process);
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(ct);
             startup.CancelAfter(TimeSpan.FromSeconds(20));
@@ -85,6 +89,11 @@ internal sealed class TerminalShell : IDisposable
         try
         {
             await writer.WriteLineAsync(JsonSerializer.Serialize(new { source = Convert.ToBase64String(Encoding.UTF8.GetBytes(script)), fence }).AsMemory(), deadline.Token);
+            var ready = await LibraryRmm.Support.SupportPipeFraming.ReadLineAsync(reader, 16384, deadline.Token);
+            using (var message = JsonDocument.Parse(ready ?? throw new IOException("Terminal exited before accepting input.")))
+                if (message.RootElement.GetProperty("fence").GetString() != fence || !message.RootElement.GetProperty("ready").GetBoolean())
+                    throw new IOException("Terminal input boundary mismatch.");
+            inputOpen = true;
             // If output cannot be durably retained (a pump faulted), stop now instead of waiting for
             // the command to finish or time out while its blocked pipe stalls the process.
             var resultTask = LibraryRmm.Support.SupportPipeFraming.ReadLineAsync(reader, 16384, deadline.Token);
@@ -98,6 +107,9 @@ internal sealed class TerminalShell : IDisposable
                 await pumpFault.Task; // Rethrows the output failure (IOException or the callback's exception).
             }
             var resultLine = await resultTask;
+            inputOpen = false;
+            // Wait out an in-progress write before another command can start.
+            await inputLock.WaitAsync(deadline.Token); inputLock.Release();
             if (resultLine is null) throw new IOException("PowerShell exited before confirming the command boundary.");
             using var document = JsonDocument.Parse(resultLine);
             var result = document.RootElement;
@@ -120,6 +132,18 @@ internal sealed class TerminalShell : IDisposable
             if (stderr.IsCompletedSuccessfully) try { await DrainAsync(process.StandardError.BaseStream, "stderr", output, drain.Token); } catch (OperationCanceledException) { }
             return (new ProcessResult(-1, true, "Terminal ended or timed out; its state will not be recreated and this command will not be retried. " + exception.GetType().Name + ": " + exception.Message), null);
         }
+        finally { inputOpen = false; }
+    }
+    public async Task WriteInputAsync(string text, CancellationToken ct)
+    {
+        if (text.Length > 4096 || text.IndexOfAny(['\r', '\n', '\0']) >= 0) throw new InvalidDataException("Invalid terminal reply.");
+        await inputLock.WaitAsync(ct);
+        try
+        {
+            if (!AcceptingInput) return; // The command ended during collection; discard.
+            await process.StandardInput.WriteLineAsync(text.AsMemory(), ct);
+        }
+        finally { inputLock.Release(); }
     }
     /// <summary>Anything still alive in the job besides the baseline after a command is a detached
     /// background process: it could write into the next command's output, so the terminal ends (the
@@ -175,7 +199,7 @@ internal sealed class TerminalShell : IDisposable
             await Emit(bytes, bytes.Length - keep, false); pending = bytes[(bytes.Length - keep)..];
         }
     }
-    public void End() { ended = true; processJob.Dispose(); try { if (!process.HasExited) process.Kill(true); } catch (InvalidOperationException) { } }
+    public void End() { inputOpen = false; ended = true; processJob.Dispose(); try { if (!process.HasExited) process.Kill(true); } catch (InvalidOperationException) { } }
     private static string DescribeProcess(int pid)
     {
         try { using var value = Process.GetProcessById(pid); return pid + ":" + value.ProcessName + ":" + value.MainModule?.FileName; }
@@ -187,6 +211,39 @@ internal sealed class TerminalShell : IDisposable
         [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
         [Console]::InputEncoding=New-Object Text.UTF8Encoding($false)
         $OutputEncoding=[Console]::OutputEncoding; $FormatEnumerationLimit=-1
+        # Read exactly one line without Console.In's read-ahead, so unused replies
+        # can be drained before the next authorized command. Native children use
+        # the same redirected stdin handle; full-screen console input is unsupported.
+        Add-Type -TypeDefinition @'
+        using System;
+        using System.IO;
+        using System.Text;
+        using System.Runtime.InteropServices;
+        public static class RmmTerminalInput {
+            [DllImport("kernel32.dll", SetLastError=true)] static extern bool PeekNamedPipe(IntPtr h, IntPtr b, uint n, IntPtr r, out uint available, IntPtr left);
+            [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+            public static void Drain() {
+                uint count;
+                using (var input = Console.OpenStandardInput())
+                    while (PeekNamedPipe(GetStdHandle(-10), IntPtr.Zero, 0, IntPtr.Zero, out count, IntPtr.Zero) && count > 0)
+                        for (uint i=0; i<count; i++) if (input.ReadByte()<0) return;
+            }
+            public static string ReadLine() {
+                using (var bytes = new MemoryStream())
+                using (var input = Console.OpenStandardInput()) {
+                    int value;
+                    while ((value=input.ReadByte())>=0 && value!=10) if (value!=13) bytes.WriteByte((byte)value);
+                    return Encoding.UTF8.GetString(bytes.ToArray());
+                }
+            }
+        }
+        '@
+        function global:Read-Host {
+            param([Parameter(Position=0)] [string] $Prompt, [switch] $AsSecureString, [switch] $MaskInput)
+            if($AsSecureString -or $MaskInput){throw 'Secure prompts are unsupported in this remote terminal. Do not enter passwords or secrets.'}
+            if($Prompt){[Console]::Out.Write($Prompt + ': '); [Console]::Out.Flush()}
+            [RmmTerminalInput]::ReadLine()
+        }
         foreach($width in 32766,16384,8192,4096){try{$Host.UI.RawUI.BufferSize=New-Object Management.Automation.Host.Size($width,[Math]::Max($Host.UI.RawUI.WindowSize.Height,1));break}catch{}}
         {{{PowerShellRunner.LiveConsoleFunctions()}}}
         $__rmmPipe=New-Object IO.Pipes.NamedPipeClientStream('.', '{{{pipeName}}}', [IO.Pipes.PipeDirection]::InOut)
@@ -196,6 +253,8 @@ internal sealed class TerminalShell : IDisposable
         $__rmmWriter.AutoFlush=$true
         while($null -ne ($__rmmLine=$__rmmReader.ReadLine())) {
             $__rmmRequest=$__rmmLine|ConvertFrom-Json
+            [RmmTerminalInput]::Drain()
+            $__rmmWriter.WriteLine((@{fence=$__rmmRequest.fence;ready=$true}|ConvertTo-Json -Compress))
             $__rmmSource=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($__rmmRequest.source))
             $__rmmCode=0; $global:LASTEXITCODE=0
             try {

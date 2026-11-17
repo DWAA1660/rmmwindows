@@ -7,7 +7,7 @@ type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type Endpoint = { id: string; hostname: string; displayName?: string; online?: boolean };
 type Chunk = { sequence: number; stream: string; text: string };
 type Job = { id: string; status: string; payload: { script?: string }; createdAt: string; exitCode?: number | null; summary?: string | null };
-type Session = { id: string; status: 'open' | 'closed'; workingDirectory: string | null; expiresAt: string; createdAt: string; reason?: string | null; jobs?: Job[] };
+type Session = { id: string; status: 'open' | 'closed'; workingDirectory: string | null; expiresAt: string; createdAt: string; reason?: string | null; jobs?: Job[]; inputJobId?: string | null };
 type PendingCommand = { command: string; timeoutSeconds: number; idempotencyKey: string };
 type Page = { chunks: Chunk[]; nextCursor: number; hasMore: boolean };
 type Props = { endpoint: Endpoint; request: Request; onClose: () => void; onError: (error: unknown) => void };
@@ -33,6 +33,8 @@ function EndpointTerminal({ endpoint, request, onClose, onError }: Props) {
   const [creating, setCreating] = useState(true), [createError, setCreateError] = useState('');
   const [pollError, setPollError] = useState(''), [sendError, setSendError] = useState(''), [endError, setEndError] = useState('');
   const [command, setCommand] = useState(''), [timeoutSeconds, setTimeoutSeconds] = useState(900);
+  const [reply, setReply] = useState(''), [replySending, setReplySending] = useState(false), [replyStatus, setReplyStatus] = useState('');
+  const replying = useRef(false);
   const [submitting, setSubmitting] = useState(false), [uncertain, setUncertain] = useState<PendingCommand | null>(null), [ending, setEnding] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true), [expanded, setExpanded] = useState<Set<string>>(new Set()), [now, setNow] = useState(Date.now());
   const api = useRef(request), report = useRef(onError), leave = useRef(onClose);
@@ -198,6 +200,21 @@ function EndpointTerminal({ endpoint, request, onClose, onError }: Props) {
     }
   };
   const inFlight = jobs.find(job => active(job.status));
+  const inputJob = inFlight?.status === 'running' && session?.inputJobId === inFlight.id ? inFlight : null;
+  const sendReply = async () => {
+    const current = sessionRef.current;
+    if (!current || !inputJob || replying.current || endingRef.current) return;
+    replying.current = true; setReplySending(true); setReplyStatus('');
+    const text = reply;
+    setReply(''); // Never leave an ambiguous reply ready for accidental resubmission.
+    try {
+      await api.current(`/terminals/${current.id}/input`, 'POST', { jobId: inputJob.id, inputId: crypto.randomUUID(), text });
+      if (mounted.current) setReplyStatus('Reply queued for this command. Check its output before replying again.');
+    } catch (error) {
+      if (mounted.current) setReplyStatus(`Reply delivery is uncertain: ${message(error)} It will not be retried automatically. Check the output before sending another reply.`);
+    } finally { replying.current = false; if (mounted.current) setReplySending(false); }
+  };
+  useEffect(() => { setReply(''); setReplyStatus(''); }, [inputJob?.id]);
   const expired = !!session && Date.parse(session.expiresAt) <= now;
   const ended = session?.status === 'closed' || expired;
   const disabled = !session || ended || submitting || !!uncertain || !!inFlight || ending || endpoint.online === false;
@@ -218,7 +235,7 @@ function EndpointTerminal({ endpoint, request, onClose, onError }: Props) {
         <button type="button" className="terminal-light-button" onClick={() => void poll()} disabled={!session || ending} title="Refresh command status and output"><RefreshCw size={13} />Refresh</button>
         <button type="button" className="terminal-end-button" onClick={() => void endSession()} disabled={ending}><CircleStop size={14} />{ending ? 'Ending…' : ended || !session ? 'Close window' : 'End session'}</button>
       </div>
-      <div className="terminal-info" id={descriptionId}><ShieldCheck size={15} /><p>Variables, functions and the current folder stay in the same PowerShell process. Use commands that finish without prompts. Ending the session stops its process at the next agent check, within about 10 seconds.</p></div>
+      <div className="terminal-info" id={descriptionId}><ShieldCheck size={15} /><p>Variables, functions and the current folder stay in the same PowerShell process. Agent 0.1.15+ supports line replies to Read-Host and native stdin prompts while a command runs. Full-screen tools and secure prompts are unsupported. Do not enter secrets. Ending the session stops its process at the next agent check, within about 10 seconds.</p></div>
       {(createError || pollError || endError) && <div className="terminal-error" role="alert"><TriangleAlert size={16} /><div>{endError || createError || `Viewing is temporarily interrupted: ${pollError}`}<small>{createError ? 'Persistent terminals need agent 0.1.7 or later.' : 'Command execution is never retried automatically.'}</small></div>{createError && <button type="button" className="terminal-light-button" disabled={creating} onClick={() => void openSession()}>Retry opening</button>}</div>}
       {endpoint.online === false && !ended && <div className="terminal-notice">The endpoint is offline. Commands stay in the editor until you send them after it reconnects.</div>}
       {ended && <div className="terminal-notice">{expired && session?.status !== 'closed' ? 'The two-hour terminal session ended.' : endingReason(session?.reason)} A new terminal starts a fresh PowerShell process.</div>}
@@ -227,6 +244,11 @@ function EndpointTerminal({ endpoint, request, onClose, onError }: Props) {
         {jobs.map((job, index) => <CommandResult key={job.id} job={job} index={index + 1} chunks={output[job.id] || []} hasMore={!!more[job.id]} expanded={expanded.has(job.id)} onToggle={() => setExpanded(previous => { const next = new Set(previous); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next; })} />)}
       </div>
       <div className="terminal-composer">
+        {inputJob && !ended && <div className="terminal-reply">
+          <label htmlFor={`${headingId}-reply`}>Reply to running command (Enter sends; blank replies allowed)</label>
+          <div className="terminal-input-row"><input id={`${headingId}-reply`} value={reply} maxLength={4096} onChange={event => setReply(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); void sendReply(); } }} disabled={replySending || ending || endpoint.online === false} placeholder="For example: Y" autoComplete="off" /><button type="button" className="terminal-run-button" disabled={replySending || ending || endpoint.online === false} onClick={() => void sendReply()}>{replySending ? 'Sending…' : 'Send reply'}</button></div>
+          <small role="status">{replyStatus || 'Send only when the output asks a question. Replies are sent once to this command and expire after 10 seconds if not collected.'}</small>
+        </div>}
         {uncertain && <div className="terminal-uncertain" role="alert"><TriangleAlert size={16} /><div><strong>Command delivery needs checking</strong><p>{sendError} The request may already be queued or running. An explicit retry uses the same request ID; if it never reached the server, it queues this command once.</p></div><button type="button" className="terminal-light-button" disabled={submitting || ending} onClick={() => void send(uncertain)}>{submitting ? <Loader2 size={14} className="terminal-spin" /> : <RefreshCw size={14} />}Retry same request</button></div>}
         <label htmlFor={`${headingId}-command`} className="terminal-prompt"><span>PS</span><code>{session?.workingDirectory || endpoint.hostname}&gt;</code></label>
         <div className="terminal-input-row"><textarea id={`${headingId}-command`} ref={editor} rows={3} maxLength={262144} value={command} onChange={event => { setCommand(event.target.value); historyPosition.current = null; }} onKeyDown={editorKeys} readOnly={!!uncertain} disabled={!session || ended || submitting || ending} placeholder={inFlight ? 'Waiting for the current command to finish…' : 'Get-Location'} aria-label="PowerShell command" spellCheck={false} autoCapitalize="off" autoCorrect="off" /><button type="button" className="terminal-run-button" disabled={disabled || !command.trim()} onClick={() => void send()}>{submitting ? <Loader2 size={16} className="terminal-spin" /> : <Play size={15} />}{submitting ? 'Sending' : 'Run command'}</button></div>

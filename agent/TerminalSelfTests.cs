@@ -30,6 +30,31 @@ public static class TerminalSelfTests
             Assert(!failure.Result.Interrupted && failure.Result.ExitCode == 1, "Script failure should leave the terminal alive.");
             var recovery = await shell.ExecuteAsync("$savedNumber", Emit, 20, CancellationToken.None);
             Assert(!recovery.Result.Interrupted, "Script failure destroyed persistent state.");
+            async Task Interactive(string script, string prompt, string reply, string expected)
+            {
+                var text = new StringBuilder();
+                var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var running = shell.ExecuteAsync(script, (_, value) => { lock (text) { text.Append(value); if (text.ToString().Contains(prompt)) asked.TrySetResult(); } return Task.CompletedTask; }, 20, CancellationToken.None);
+                await asked.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert(!running.IsCompleted, "Prompt exited before a reply could be sent: " + text);
+                for (var wait = 0; !shell.AcceptingInput && wait < 100; wait++) await Task.Delay(10);
+                await shell.WriteInputAsync(reply, CancellationToken.None);
+                var result = await running;
+                Assert(!result.Result.Interrupted && result.Result.ExitCode == 0 && text.ToString().Contains(expected), "Interactive reply failed: " + text + result.Result.InterruptionReason);
+            }
+            await Interactive("$answer=Read-Host 'Your name'; \"answer=$answer\"", "Your name:", "Zoë 中文🙂", "answer=Zoë 中文🙂");
+            await Interactive("$answer=Read-Host 'Blank'; \"blank=$($answer.Length)\"", "Blank:", "", "blank=0");
+            await Interactive("cmd /d /v:on /c 'set /p answer=Native-question? & echo native=!answer!'", "Native-question?", "Y", "native=Y");
+            // Extra input to a non-reading command must not answer the next prompt.
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var unused = shell.ExecuteAsync("[Console]::Write('not-reading'); Start-Sleep -Milliseconds 500", (_, _) => { waiting.TrySetResult(); return Task.CompletedTask; }, 20, CancellationToken.None);
+            await waiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await shell.WriteInputAsync("stale-reply", CancellationToken.None);
+            Assert(!(await unused).Result.Interrupted, "Unused input ended its command.");
+            await Interactive("$answer=Read-Host 'Fresh'; \"fresh=$answer\"", "Fresh:", "current-reply", "fresh=current-reply");
+            await shell.WriteInputAsync("idle-reply-must-be-discarded", CancellationToken.None);
+            await Interactive("$answer=Read-Host 'After idle'; \"idle=$answer\"", "After idle:", "new-reply", "idle=new-reply");
+            Console.WriteLine("PASS native stdin and Read-Host replies, Unicode, blank lines, stale/idle input discarded across command boundaries");
             var timeout = await shell.ExecuteAsync("Start-Sleep -Seconds 10", Emit, 1, CancellationToken.None);
             Assert(timeout.Result.Interrupted && shell.Ended, "Timeout did not end the terminal process.");
             var rejected = false;
