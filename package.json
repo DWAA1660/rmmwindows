@@ -3,15 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": [
-    "server",
-    "web"
-  ],
   "scripts": {
     "dev": "npm run build && node server/src/index.mjs",
-    "build": "npm --workspace=web run build",
+    "build": "npm --prefix web run build",
     "start": "node server/src/index.mjs",
-    "lint": "npm --workspace=web run lint",
-    "test": "npm --workspace=server test && npm --workspace=web test"
+    "lint": "npm --prefix web run lint",
+    "test": "npm --prefix server test && npm --prefix web test"
   }
 }
