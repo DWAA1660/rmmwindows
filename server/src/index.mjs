@@ -1,7 +1,18 @@
 import { createApp } from './app.mjs';
 
-const service = createApp();
-const host = process.env.HOST || '127.0.0.1';
+const isProd = process.env.NODE_ENV === 'production';
+const allowIframeDefault = !isProd && !process.env.PUBLIC_ORIGIN && process.env.ALLOW_IFRAME === undefined;
+const usePreviewAdmin = !isProd && !process.env.ADMIN_USERNAME && !process.env.ADMIN_PASSWORD;
+const env = {
+  ...process.env,
+  ...(allowIframeDefault ? { ALLOW_IFRAME: '1' } : {}),
+  ...(usePreviewAdmin ? { ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'library-preview' } : {})
+};
+if (usePreviewAdmin) {
+  console.warn('No ADMIN_USERNAME/ADMIN_PASSWORD set; using preview admin credentials (username: admin) on first startup.');
+}
+const service = createApp({ env });
+const host = process.env.HOST || '0.0.0.0';
 const port = Number(process.env.PORT || 3000);
 const listener = service.app.listen(port, host, () => console.log(`RMM listening on ${host}:${port}`));
 service.attachSupport(listener);

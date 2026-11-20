@@ -220,8 +220,12 @@ export function openRemoteSupport(endpointId: string): Window | null {
     "_blank",
     "popup,width=1360,height=900,resizable=yes,scrollbars=yes",
   );
-  if (popup) popup.opener = null;
-  return popup;
+  if (popup) {
+    popup.opener = null;
+    return popup;
+  }
+  window.location.assign(url);
+  return window;
 }
 
 /**

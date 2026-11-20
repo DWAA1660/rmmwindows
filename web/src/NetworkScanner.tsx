@@ -11,6 +11,7 @@ import {
   subnetGrids, type DeviceKind, type Expectation, type Preset, type Risk, type Scan, type ScanHost, type ScanSource, type Speed, type Target,
 } from './netscanModel';
 import './NetworkScanner.css';
+import type { ConfirmDialogState } from './components/ConfirmDialog';
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
 type ScanEndpoint = { id: string; hostname: string; displayName?: string; online: boolean; revoked?: boolean; tags?: string[]; groupId?: string; groupName?: string;
@@ -65,7 +66,7 @@ function Verdict({ verdict, expect }: { verdict: Scan['verdict'] | 'pending' | n
 }
 
 /** Network reachability scanner: what can each computer reach, on which ports, and does that match policy. */
-export function NetworkScanner({ endpoints, canRun, request, notify }: { endpoints: ScanEndpoint[]; canRun: boolean; request: Request; notify: (message: string) => void }) {
+export function NetworkScanner({ endpoints, canRun, request, notify, onConfirm }: { endpoints: ScanEndpoint[]; canRun: boolean; request: Request; notify: (message: string) => void; onConfirm?: (dialog: ConfirmDialogState) => void }) {
   const [builder, setBuilder] = useState<Builder>(blankBuilder);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [scans, setScans] = useState<Scan[]>([]);
@@ -122,9 +123,21 @@ export function NetworkScanner({ endpoints, canRun, request, notify }: { endpoin
       speed: scan.speed, ping: scan.ping, resolveNames: scan.resolveNames, onlyResponsive: scan.onlyResponsive, name: scan.name, testId: scan.testId });
     setOpenId(null); window.scrollTo({ top: 0, behavior: 'smooth' });
   };
-  const removePreset = async (preset: Preset) => {
-    if (!window.confirm(`Delete “${preset.name}”? Past scan results are kept.`)) return;
+  const doRemovePreset = async (preset: Preset) => {
     try { await request(`/netscan/presets/${preset.id}`, 'DELETE'); notify(`Deleted “${preset.name}”.`); if (builder.testId === preset.id) update({ testId: null }); void loadPresets(); } catch (err) { fail(err); }
+  };
+  const removePreset = (preset: Preset) => {
+    if (onConfirm) {
+      onConfirm({
+        title: `Delete “${preset.name}”?`,
+        description: 'Past scan results using this saved preset or test will be kept.',
+        confirmLabel: 'Delete preset',
+        tone: 'danger',
+        onConfirm: () => doRemovePreset(preset),
+      });
+      return;
+    }
+    void doRemovePreset(preset);
   };
 
   if (openId) return <ScanResults id={openId} request={request} endpoints={endpoints} canRun={canRun} onBack={() => { setOpenId(null); void loadScans(); }} onRerun={rerun} />;
@@ -146,7 +159,7 @@ export function NetworkScanner({ endpoints, canRun, request, notify }: { endpoin
             <Step n={1} title="Scan from" hint="Each computer runs the scan itself, so results show what it can reach.">
               <div className="ns-sources">
                 {builder.sources.map(id => (
-                  <span key={id} className="ns-source-chip"><span className={`live-dot ${byId.get(id)?.online ? '' : 'offline'}`} />{name(id)}
+                  <span key={id} className="ns-source-chip"><span className={`status-dot ${byId.get(id)?.online ? 'green' : 'gray'}`} />{name(id)}
                     <button type="button" aria-label={`Remove ${name(id)}`} onClick={() => update({ sources: builder.sources.filter(s => s !== id) })}><X size={12} /></button></span>
                 ))}
                 <button type="button" className="ns-add" onClick={() => setDialog({ kind: 'sources' })}><Plus size={14} />{builder.sources.length ? 'Change computers' : 'Choose computers'}</button>
@@ -494,7 +507,7 @@ function ScanResults({ id, request, endpoints, canRun, onBack, onRerun }: { id: 
           <div className="tabs" role="tablist">
             {tabs.filter(t => !t.hidden).map(t => <button key={t.key} role="tab" aria-selected={tab === t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}><t.icon size={14} />{t.label}{t.count !== undefined && <span className="tab-count">{t.count}</span>}</button>)}
           </div>
-          {scan.status !== 'finished' && <span className="ns-live"><span className="live-dot" />Updating live</span>}
+          {scan.status !== 'finished' && <span className="ns-live">Updating live</span>}
         </div>
         {tab === 'hosts' && <HostsTable hosts={merged} multi={sources.length > 1} names={new Map(scan.sources.map(s => [s.endpointId, s.endpointName]))} waiting={scan.status !== 'finished'} />}
         {tab === 'map' && <SubnetMap scan={scan} hosts={merged} selfIps={selfIps} />}

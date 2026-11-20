@@ -24,7 +24,7 @@ export function SoftwareInventory({ endpoints, onOpenEndpoint }: { endpoints: Fl
   };
   const computerChip = (id: string) => (
     <button key={id} type="button" className="software-computer" onClick={() => onOpenEndpoint(id)}>
-      <span className={`live-dot ${byId.get(id)?.online ? '' : 'offline'}`} aria-hidden="true" />{name(id)}
+      <span className={`status-dot ${byId.get(id)?.online ? 'green' : 'gray'}`} aria-hidden="true" />{name(id)}
     </button>
   );
   const detail = (group: SoftwareGroup) => {

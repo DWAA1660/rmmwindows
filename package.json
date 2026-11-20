@@ -1,0 +1,17 @@
+{
+  "name": "library-rmm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run build && node server/src/index.mjs",
+    "build": "npm --workspace=web run build",
+    "start": "node server/src/index.mjs",
+    "lint": "npm --workspace=web run lint",
+    "test": "npm --workspace=server test && npm --workspace=web test"
+  }
+}

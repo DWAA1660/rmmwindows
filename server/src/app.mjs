@@ -148,6 +148,7 @@ export function createApp(options = {}) {
   const supportSocketOrigin = publicOrigin ? publicOrigin.replace(/^http/, 'ws') : '';
   // Full inventory interval pushed to agents on every heartbeat (1-1440 minutes, default 5).
   const inventoryMinutes = Math.min(1440, Math.max(1, Number.parseInt(env.INVENTORY_MINUTES || '5', 10) || 5));
+  const allowIframe = env.ALLOW_IFRAME === '1';
   const secureCookie = env.COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://');
   const username = env.ADMIN_USERNAME;
   if (!db.prepare('SELECT id FROM users LIMIT 1').get()) {
@@ -164,7 +165,18 @@ export function createApp(options = {}) {
   // container port must remain private so clients cannot forge their own IP.
   if (env.TRUST_PROXY === '1') app.set('trust proxy', 1);
   app.use((req, res, next) => {
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${supportSocketOrigin}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` });
+    const framePolicy = allowIframe
+      ? "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com"
+      : "frame-ancestors 'none'";
+    const wsConnect = supportSocketOrigin || (allowIframe ? 'ws: wss:' : '');
+    const headers = {
+      'X-Content-Type-Options': 'nosniff',
+      ...(allowIframe ? {} : { 'X-Frame-Options': 'DENY' }),
+      'Referrer-Policy': 'same-origin',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'Content-Security-Policy': `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ${wsConnect}; ${framePolicy}; base-uri 'self'; form-action 'self'`
+    };
+    res.set(headers);
     if (secureCookie) res.set('Strict-Transport-Security', 'max-age=31536000');
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     next();
@@ -177,7 +189,13 @@ export function createApp(options = {}) {
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
   const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
   const updateHealth = mountUpdateHealth({ db, audit, fail, str });
-  const expectedOrigin = req => publicOrigin || `http://${req.headers.host}`;
+  const isHttpsRequest = req => Boolean(secureCookie || req.secure || req.get('x-forwarded-proto')?.split(',')[0].trim() === 'https');
+  const expectedOrigin = req => {
+    if (publicOrigin) return publicOrigin;
+    if (isHttpsRequest(req)) return `https://${req.headers.host}`;
+    if (allowIframe && equalText(req.get('origin'), `https://${req.headers.host}`)) return `https://${req.headers.host}`;
+    return `http://${req.headers.host}`;
+  };
   function checkOrigin(req, res, next) {
     // Browsers always send Origin for same-origin fetch mutations. Requiring it also
     // blocks login CSRF; agents never pass through this operator middleware.
@@ -253,7 +271,8 @@ export function createApp(options = {}) {
     const expires = new Date(Date.now() + 12 * 3600000).toISOString();
     db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(nowIso());
     db.prepare('INSERT INTO sessions VALUES (?,?,?,?)').run(hashToken(token), user.id, csrfToken, expires);
-    res.cookie('rmm_session', token, { httpOnly: true, secure: Boolean(secureCookie), sameSite: 'strict', maxAge: 12 * 3600000, path: '/' });
+    const crossSiteCookie = allowIframe && (isHttpsRequest(req) || req.get('origin')?.startsWith('https://'));
+    res.cookie('rmm_session', token, { httpOnly: true, secure: Boolean(secureCookie || crossSiteCookie), sameSite: crossSiteCookie ? 'none' : 'strict', maxAge: 12 * 3600000, path: '/' });
     audit(user.username, 'auth.login', null);
     res.json({ user: publicUser(user), csrfToken });
   });
@@ -261,7 +280,8 @@ export function createApp(options = {}) {
   mountAccounts(app, { db, operator, csrf, audit, fail, str });
   app.post('/api/auth/logout', operator, csrf, (req, res) => {
     db.prepare('DELETE FROM sessions WHERE token_hash=?').run(req.operator.token_hash);
-    res.clearCookie('rmm_session', { path: '/', secure: Boolean(secureCookie), sameSite: 'strict', httpOnly: true });
+    const crossSiteCookie = allowIframe && (isHttpsRequest(req) || req.get('origin')?.startsWith('https://'));
+    res.clearCookie('rmm_session', { path: '/', secure: Boolean(secureCookie || crossSiteCookie), sameSite: crossSiteCookie ? 'none' : 'strict', httpOnly: true });
     audit(req.operator.username, 'auth.logout'); res.json({ ok: true });
   });
 

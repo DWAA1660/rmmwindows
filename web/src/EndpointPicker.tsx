@@ -32,7 +32,7 @@ export function EndpointPicker({ endpoints, value, onChange }: {
         {visible.map(ep => (
           <label key={ep.id} className={chosen.has(ep.id) ? 'chosen' : ''}>
             <input type="checkbox" checked={chosen.has(ep.id)} onChange={() => toggle(ep.id)} />
-            <span className={`live-dot ${ep.online ? '' : 'offline'}`} aria-hidden="true" />
+            <span className={`status-dot ${ep.online ? 'green' : 'gray'}`} aria-hidden="true" />
             <strong>{name(ep)}</strong>
             <small>{ep.online ? 'Online' : 'Offline · runs when it reconnects'}</small>
           </label>

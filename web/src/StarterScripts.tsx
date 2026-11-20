@@ -44,7 +44,7 @@ export function StarterScripts({ existingNames, canEdit, onAdd, onRun }: {
                       {inLibrary ? <><Check size={13} /> In library</> : <><Plus size={13} /> Add to library</>}
                     </button>
                   )}
-                  {canEdit && <button type="button" className="button small primary" onClick={() => onRun(template)}><Play size={13} /> Run…</button>}
+                  {canEdit && <button type="button" className="button small primary" onClick={() => onRun(template)}><Play size={13} /> Run</button>}
                 </span>
               </footer>
             </article>

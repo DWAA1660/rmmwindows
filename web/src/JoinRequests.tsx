@@ -17,15 +17,16 @@ const ago = (iso?: string | null) => {
   return new Date(iso).toLocaleDateString();
 };
 
+import type { ConfirmDialogState } from './components/ConfirmDialog';
+
 /** Computers that installed the agent without a token and are asking to join. */
-export function JoinRequests({ requests, request, canDecide, onChanged }: {
-  requests: JoinRequest[]; request: Request; canDecide: boolean; onChanged: () => void;
+export function JoinRequests({ requests, request, canDecide, onChanged, onConfirm }: {
+  requests: JoinRequest[]; request: Request; canDecide: boolean; onChanged: () => void; onConfirm?: (dialog: ConfirmDialogState) => void;
 }) {
   const [busy, setBusy] = useState(''), [error, setError] = useState('');
   const pending = requests.filter(row => row.status === 'pending');
   const decided = requests.filter(row => row.status !== 'pending');
-  const act = async (row: JoinRequest, action: 'approve' | 'deny' | 'remove') => {
-    if (action === 'approve' && !window.confirm(`Approve ${row.hostname}${row.remoteIp ? ` (${row.remoteIp})` : ''}? It will be able to receive administrative jobs from this console.`)) return;
+  const performAction = async (row: JoinRequest, action: 'approve' | 'deny' | 'remove') => {
     setBusy(row.id); setError('');
     try {
       if (action === 'remove') await request(`/join-requests/${row.id}`, 'DELETE');
@@ -33,6 +34,19 @@ export function JoinRequests({ requests, request, canDecide, onChanged }: {
       onChanged();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(''); }
+  };
+  const act = (row: JoinRequest, action: 'approve' | 'deny' | 'remove') => {
+    if (action === 'approve' && onConfirm) {
+      onConfirm({
+        title: `Approve ${row.hostname}?`,
+        description: `${row.hostname}${row.remoteIp ? ` (${row.remoteIp})` : ''} will receive endpoint credentials and be able to execute administrative jobs from this console.`,
+        confirmLabel: 'Approve endpoint',
+        tone: 'primary',
+        onConfirm: () => performAction(row, 'approve'),
+      });
+      return;
+    }
+    void performAction(row, action);
   };
   const machine = (row: JoinRequest) => (
     <div className="join-machine">
