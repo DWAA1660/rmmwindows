@@ -42,6 +42,7 @@ import {
   XCircle,
   Package,
   Sparkles,
+  Radar,
 } from "lucide-react";
 import "./styles.css";
 import {EndpointGroups,type EndpointGroup} from './EndpointGroups';
@@ -66,6 +67,7 @@ import { scriptTemplates } from './scriptTemplates';
 import type { PaletteItem } from './commandPaletteModel';
 import { BulkActions } from './BulkActions';
 import { BulkAgentUpdate } from './BulkAgentUpdate';
+import { NetworkScanner } from './NetworkScanner';
 import "./console-layout.css";
 
 type Disk = {
@@ -155,6 +157,7 @@ type View =
   | "overview"
   | "endpoints"
   | "software"
+  | "network"
   | "scripts"
   | "schedules"
   | "activity"
@@ -731,6 +734,7 @@ function App() {
         { key: "overview", label: "Overview", icon: LayoutDashboard },
         { key: "endpoints", label: "Endpoints", icon: Monitor, count: active.length },
         { key: "software", label: "Software", icon: Package },
+        { key: "network", label: "Network scanner", icon: Radar },
       ],
     },
     {
@@ -774,6 +778,10 @@ function App() {
     software: {
       title: "Software",
       subtitle: "Every installed program across the fleet, by version.",
+    },
+    network: {
+      title: "Network scanner",
+      subtitle: "What each computer can reach, on which ports — and whether your firewall rules hold.",
     },
     scripts: {
       title: "Script library",
@@ -1699,6 +1707,14 @@ function App() {
                 const ep = endpoints.find((item) => item.id === id);
                 if (ep) setDetail(ep);
               }}
+            />
+          )}
+          {view === "network" && (
+            <NetworkScanner
+              endpoints={endpoints}
+              canRun={user.role !== "viewer"}
+              request={api}
+              notify={notify}
             />
           )}
           {view === "schedules" && (

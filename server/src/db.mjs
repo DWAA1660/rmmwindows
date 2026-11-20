@@ -134,6 +134,19 @@ export function openDatabase(filename) {
         PRIMARY KEY(upload_id, job_id));
       PRAGMA user_version=11;`);
   });
+  // v12: network scanner. Saved target lists / port lists / reachability tests, and scans that link
+  // to ordinary at-most-once powershell jobs (one per source computer). Results stay in job output.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS netscan_presets (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('targets','ports','test')),
+        name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', data TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS netscan_presets_name ON netscan_presets(kind, lower(name));
+      CREATE TABLE IF NOT EXISTS netscans (id TEXT PRIMARY KEY, name TEXT NOT NULL, test_id TEXT, config TEXT NOT NULL,
+        endpoint_ids TEXT NOT NULL, run_id TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS netscans_created ON netscans(created_at);
+      CREATE TABLE IF NOT EXISTS netscan_jobs (job_id TEXT PRIMARY KEY REFERENCES jobs(id), scan_id TEXT NOT NULL REFERENCES netscans(id), endpoint_id TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS netscan_jobs_scan ON netscan_jobs(scan_id);
+      PRAGMA user_version=12;`);
+  });
   return db;
 }
 
