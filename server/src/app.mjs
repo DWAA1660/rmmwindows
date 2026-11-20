@@ -13,6 +13,7 @@ import { mountUpdateHealth } from './update-health.mjs';
 import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
+import { mountNetscan } from './netscan.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -451,6 +452,7 @@ export function createApp(options = {}) {
   admin.get('/endpoints', (req, res) => res.json(db.prepare('SELECT * FROM endpoints ORDER BY display_name COLLATE NOCASE').all().map(endpointView)));
   updateHealth.mountConsole(admin);
   mountGroups(admin, {db,audit,fail,str});
+  mountNetscan(admin, { db, audit, fail, str, insertJob, getJob, jobView, hashToken });
   admin.get('/endpoints/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);
     if (!row) fail(404, 'Endpoint not found.'); res.json(endpointView(row));
