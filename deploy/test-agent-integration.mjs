@@ -243,7 +243,8 @@ try {
   const zipPath = join(temp, 'received.zip');
   await writeFile(zipPath, Buffer.from(await zipResponse.arrayBuffer()));
   const extracted = join(temp, 'extracted');
-  const expand = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $env:RMM_ZIP -DestinationPath $env:RMM_OUT'],
+  const expand = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($env:RMM_ZIP, $env:RMM_OUT)"],
     { encoding: 'utf8', env: { ...process.env, RMM_ZIP: zipPath, RMM_OUT: extracted } });
   assert.equal(expand.status, 0, expand.stderr);
   assert.deepEqual(await readFile(join(extracted, 'Zip Me ü', 'nested', 'data.bin')), nestedBytes);
