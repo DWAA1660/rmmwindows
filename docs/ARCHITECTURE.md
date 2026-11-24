@@ -1,5 +1,15 @@
 # Park County Library RMM
 
+## WatchGuard traffic
+
+The RMM process can run an opt-in IPv4 UDP syslog receiver for WatchGuard Fireboxes on a trusted LAN or VPN. It accepts traffic only from enabled sender addresses and the Local1 facility. Sender identity comes from the datagram peer address, so an upstream NAT or relay that combines multiple senders under one address combines their identity in RMM. Plain UDP provides no authentication, encryption, or delivery acknowledgment.
+
+A bounded queue batches writes into additive SQLite schema 13. The store retains up to 50,000 traffic events for up to seven days. Each event is at most 8 KiB. Stored events include the full UTF-8 datagram and a server receipt timestamp. Unfamiliar syntax remains visible as Unparsed. The app reports rejected datagrams and queue or storage drops since process start. Upstream and kernel packet loss is outside those counts. Retention touches only the firewall tables.
+
+Fleet → Firewall lets operators and administrators read traffic. Administrators can register, rename, and pause sender addresses with audited changes. Fireware or WatchGuard Cloud remains the interface for editing appliance policies. See [deployment setup](DEPLOYMENT.md#watchguard-firewall-traffic).
+
+For off-site hosting, the optional Windows relay listens on a specific LAN IPv4 address and sends batches over authenticated HTTPS. The scheduled task runs under Local Service. Each installed relay listens for one Firebox source address and uses a revocable key scoped to that Firebox in RMM. The server stores only a key hash. RMM uses each relay event UUID to suppress duplicate writes within retained history. The Windows relay has a bounded in-memory queue and keeps summary counters in a local status file. Restarting Windows clears that queue.
+
 ## Initial design — 2026-11-04
 
 Self-hosted Linux application at https://rmm.parkcountylibrary.org. Node 24 LTS/Express API with SQLite WAL durable state, React/Vite console, .NET 10 LTS Windows worker service installed as LocalSystem. Agents make outbound HTTPS requests only. SQLite and output live in a persistent Docker bind mount. Existing host websites must remain operational.

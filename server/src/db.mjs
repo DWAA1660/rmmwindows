@@ -147,6 +147,28 @@ export function openDatabase(filename) {
       CREATE INDEX IF NOT EXISTS netscan_jobs_scan ON netscan_jobs(scan_id);
       PRAGMA user_version=12;`);
   });
+  // v13: bounded WatchGuard traffic history, independent of endpoint job output.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS firewall_sources (
+        address TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL, last_received_at TEXT);
+      CREATE TABLE IF NOT EXISTS firewall_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL REFERENCES firewall_sources(address),
+        received_at TEXT NOT NULL, action TEXT, src_ip TEXT, dst_ip TEXT, protocol TEXT,
+        src_port INTEGER, dst_port INTEGER, policy TEXT, raw TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS firewall_events_received ON firewall_events(received_at);
+      CREATE INDEX IF NOT EXISTS firewall_events_sender ON firewall_events(sender,id DESC);
+      PRAGMA user_version=13;`);
+  });
+  transaction(db, () => {
+    const columns = db.prepare('PRAGMA table_info(firewall_sources)').all();
+    if (!columns.some(column => column.name === 'relay_key_hash'))
+      db.exec('ALTER TABLE firewall_sources ADD COLUMN relay_key_hash TEXT');
+    const eventColumns = db.prepare('PRAGMA table_info(firewall_events)').all();
+    if (!eventColumns.some(column => column.name === 'relay_id'))
+      db.exec('ALTER TABLE firewall_events ADD COLUMN relay_id TEXT');
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS firewall_events_relay ON firewall_events(sender,relay_id) WHERE relay_id IS NOT NULL;
+      PRAGMA user_version=14;`);
+  });
   return db;
 }
 

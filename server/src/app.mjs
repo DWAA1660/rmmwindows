@@ -14,6 +14,7 @@ import { mountAccounts, publicUser } from './accounts.mjs';
 import { mountJoinRequests } from './join-requests.mjs';
 import { mountFiles, validateFilesPayload } from './files.mjs';
 import { mountNetscan } from './netscan.mjs';
+import { createFirewall } from './firewall.mjs';
 import { randomToken, hashToken, passwordHash, verifyPassword, equalText, cookies, rateLimiter, MIN_PASSWORD_LENGTH } from './security.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -181,13 +182,18 @@ export function createApp(options = {}) {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     next();
   });
+  const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
+  const firewall = createFirewall({ db, env, audit, fail, str,
+    downloadDirectory: options.downloadDirectory || env.AGENT_DOWNLOAD_DIRECTORY });
+  app.post('/api/firewall/relay/:address', firewall.authorizeRelay, rateLimiter({
+    limit: 120, intervalMs: 60_000, key: req => req.params.address
+  }), express.json({ limit: '256kb' }), firewall.ingestRelay);
   app.use(express.json({ limit: '2mb', strict: true }));
   const downloads = mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
   // Agent file-download chunks and console upload chunks are the only raw (non-JSON) bodies; their
   // routes parse them themselves, after authentication (and CSRF for the console).
   const rawFileChunk = req => req.method === 'PUT' && (/^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) || /^\/uploads\/[^/]+\/chunks\/\d+$/.test(req.path)) && req.is('application/octet-stream');
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
-  const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
   const updateHealth = mountUpdateHealth({ db, audit, fail, str });
   const isHttpsRequest = req => Boolean(secureCookie || req.secure || req.get('x-forwarded-proto')?.split(',')[0].trim() === 'https');
   const expectedOrigin = req => {
@@ -473,6 +479,7 @@ export function createApp(options = {}) {
   updateHealth.mountConsole(admin);
   mountGroups(admin, {db,audit,fail,str});
   mountNetscan(admin, { db, audit, fail, str, insertJob, getJob, jobView, hashToken });
+  firewall.mount(admin);
   admin.get('/endpoints/:id', (req, res) => {
     const row = db.prepare('SELECT * FROM endpoints WHERE id=?').get(req.params.id);
     if (!row) fail(404, 'Endpoint not found.'); res.json(endpointView(row));
@@ -776,5 +783,6 @@ export function createApp(options = {}) {
   // Answer every held long-poll claim with {job:null} (used on shutdown so the listener can close).
   const releaseClaimWaiters = () => { for (const finish of [...claimWaiters]) finish(); };
   return { app, db, tickSchedules, releaseClaimWaiters, attachSupport: support.attach, stopSupport: support.shutdown, cleanupFiles: files.cleanup,
-    close: () => { terminals.shutdown(); support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
+    startFirewall: firewall.start, stopFirewall: firewall.stop,
+    close: () => { firewall.stop(); terminals.shutdown(); support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
 }

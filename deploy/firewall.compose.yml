@@ -1,0 +1,9 @@
+# Optional for a private LAN/VPN address. Merge these rmm settings into the
+# reviewed host compose.yml so the scoped updater carries them forward.
+services:
+  rmm:
+    ports:
+      - "${RMM_SYSLOG_BIND_IP:?Set RMM_SYSLOG_BIND_IP to the host LAN or VPN address}:5514:5514/udp"
+    environment:
+      FIREWALL_SYSLOG_HOST: 0.0.0.0
+      FIREWALL_SYSLOG_PORT: 5514

@@ -2,6 +2,16 @@
 
 All paths begin `/api`. JSON, UTC ISO timestamps. Operator routes require an HttpOnly session; state-changing routes require same-origin validation and CSRF header as implemented by server. Agent routes require `Authorization: Bearer <agentToken>` and are isolated from operator sessions.
 
+## WatchGuard firewall traffic (schema 14)
+
+Read routes require an administrator or operator session. Viewers receive 403. Sender changes require an administrator session, same Origin, and CSRF.
+
+- `GET /firewall` returns `{receiver,relayEnabled,rejected,dropped,lastStorageError,retentionDays,maxEvents,sources}`. The UDP receiver is `disabled`, `starting`, `listening`, or `error`. Counters and storage error time are scoped to the current process. Each source is `{address,name,enabled,lastReceivedAt,hasRelayKey}`. A null receipt time means the collector has never stored traffic for that source.
+- `PUT /firewall/sources/:address {name,enabled}` registers or edits a sender IPv4, with a name of up to 100 characters and a boolean collection toggle. Returns `{sources}`. The source limit is 64. Pausing retains the existing history under ordinary retention. Changes are audited as `firewall.source.saved`.
+- `POST /firewall/sources/:address/relay-key {}` returns a new `{key}` once and replaces the previous one. `DELETE /firewall/sources/:address/relay-key` revokes it (204). Administrator, Origin and CSRF checks apply to both operations. `GET /firewall/relay-installer` downloads the Windows ZIP from a packaged build.
+- `POST /firewall/relay/:address {events:[{id,raw}]}` uses the source-specific bearer relay key over HTTPS in production. Requires the opt-in `FIREWALL_HTTPS_RELAY=true`. Batch limit 50 and 256 KiB JSON, individual event limit 8 KiB UTF-8, and 120 requests/minute per authorized sender. Event IDs are UUID v4 and deduplicate within retained history. Returns `{acknowledged,stored,ignored}` after committing. Paused sources and facilities other than Local1 are acknowledged as ignored so a batch can drain. The relay key grants ingestion only.
+- `GET /firewall/events` accepts optional `sender` IPv4, `action=allow|deny|unparsed`, `query` (literal substring of source IP, destination IP, or policy, up to 100 characters), and positive integer `before`. Returns `{events,nextBefore}` with up to 50 events newest first. Pass `nextBefore` with the same filters for the next page. Null means the end. Each event is `{id,sender,receivedAt,action,srcIp,dstIp,protocol,srcPort,dstPort,policy,raw}`. Unparsed events have null structured fields. ICMP-style logs can have null ports. `raw` is the original accepted UTF-8 datagram.
+
 ## Public installer distribution
 
 - `GET /api/agent-download` (no authentication): `{version,runtime,sha256,sizeBytes,downloadUrl,installScriptUrl}`. Whitelisted metadata only; no enrollment credentials. Returns 503 in builds without a package.

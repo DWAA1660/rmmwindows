@@ -19,6 +19,8 @@ COPY installer/Install-Agent.ps1 installer/Uninstall-Agent.ps1 installer/README.
 COPY installer/package-agent.mjs /build/package-agent.mjs
 COPY agent/LibraryRmm.Agent.csproj /build/agent.csproj
 RUN node /build/package-agent.mjs /package /output /build/agent.csproj
+COPY installer/FirewallRelay.ps1 installer/Install-FirewallRelay.ps1 installer/Uninstall-FirewallRelay.ps1 installer/FirewallRelay-README.md /relay/
+RUN zip -j /output/library-rmm-firewall-relay-windows.zip /relay/*
 
 FROM node:24-bookworm-slim AS web-build
 WORKDIR /build/web
