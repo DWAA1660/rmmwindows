@@ -783,6 +783,6 @@ export function createApp(options = {}) {
   // Answer every held long-poll claim with {job:null} (used on shutdown so the listener can close).
   const releaseClaimWaiters = () => { for (const finish of [...claimWaiters]) finish(); };
   return { app, db, tickSchedules, releaseClaimWaiters, attachSupport: support.attach, stopSupport: support.shutdown, cleanupFiles: files.cleanup,
-    startFirewall: firewall.start, stopFirewall: firewall.stop,
+    startFirewall: firewall.start, stopFirewall: firewall.stop, tickFirewall: firewall.tick, reparseFirewallHistory: firewall.reparseHistory,
     close: () => { firewall.stop(); terminals.shutdown(); support.shutdown(); releaseClaimWaiters(); files.close(); db.close(); } };
 }

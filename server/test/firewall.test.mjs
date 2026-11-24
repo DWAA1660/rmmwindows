@@ -4,7 +4,29 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { createApp } from '../src/app.mjs';
+import { parseTraffic } from '../src/firewall-parser.mjs';
 import { listen } from './listen.mjs';
+
+const nativeDns = '<142>Nov 24 10:00:00 Edge example (2026-11-24T17:00:00) firewall: msg_id="3000-0151" Allow Guest External udp 192.168.99.50 198.51.100.70 24600 53 duration="43 seconds" sent_bytes="60" rcvd_bytes="106" src_ip="192.168.99.50" dst_ip="198.51.100.70" src_ip_nat="203.0.113.100" src_port_nat="11111" src_port="24600" dst_port="53" (DNS-00)';
+const nativeHttps = '<142>Nov 24 10:00:00 Edge example (2026-11-24T17:00:00) https-proxy[1234]: msg_id="2CFF-0000" Allow Public External tcp 192.168.99.50 198.51.100.72 25511 443 msg="HTTPS Request" sni="cdn.example.test" action="allow" app_name="SSL/TLS" sent_bytes="1959" rcvd_bytes="5157" src_ip="192.168.99.50" dst_ip="198.51.100.72" src_port="25511" dst_port="443" (HTTPS-proxy-00)';
+
+test('native Firebox DNS and HTTPS proxy logs expose policy, application, SNI and reported bytes', () => {
+  assert.deepEqual(parseTraffic(nativeDns), {
+    action: 'allow', srcIp: '192.168.99.50', dstIp: '198.51.100.70', protocol: 'udp',
+    srcPort: 24600, dstPort: 53, policy: 'DNS-00', application: null, host: null, sentBytes: 60, receivedBytes: 106, messageId: '3000-0151',
+  });
+  assert.deepEqual(parseTraffic(nativeHttps), {
+    action: 'allow', srcIp: '192.168.99.50', dstIp: '198.51.100.72', protocol: 'tcp',
+    srcPort: 25511, dstPort: 443, policy: 'HTTPS-proxy-00', application: 'SSL/TLS', host: 'cdn.example.test',
+    sentBytes: 1959, receivedBytes: 5157, messageId: '2CFF-0000',
+  });
+  const packetFilter = parseTraffic('<140>Edge firewall: msg_id="3000-0148" Deny External Firebox 40 tcp 20 192.0.2.7 198.51.100.8 48887 993 offset 5 S (Unhandled External Packet-00)');
+  assert.deepEqual([packetFilter.action, packetFilter.srcIp, packetFilter.dstPort], ['deny', '192.0.2.7', 993]);
+  const icmp = parseTraffic('<142>Edge Allow 192.0.2.1 198.51.100.1 echo-request/icmp 84 64 (Ping)');
+  assert.equal(icmp.srcPort, null);
+  assert.equal(icmp.dstPort, null);
+  assert.equal(parseTraffic('<142>firewall msg="Allow 192.0.2.1 198.51.100.1 https/tcp is only text"'), null);
+});
 
 test('Firebox traffic flows from a registered UDP sender to authorized, paginated dashboard queries', async t => {
   const probe = createSocket('udp4');
@@ -148,4 +170,62 @@ test('Firebox traffic flows from a registered UDP sender to authorized, paginate
   });
   assert.equal(revoked.status, 204);
   assert.equal((await sendRelay(replacement, batch)).status, 401);
+
+  // Schema 14 history remains intact while newly supported records acquire fields.
+  const receivedAt = new Date().toISOString();
+  const old = service.db.prepare('INSERT INTO firewall_events(sender,received_at,raw) VALUES (?,?,?)').run(relayAddress, receivedAt, nativeDns);
+  service.db.prepare('INSERT INTO firewall_events(sender,received_at,raw) VALUES (?,?,?)').run(relayAddress, receivedAt, nativeHttps);
+  assert.equal(service.reparseFirewallHistory(), true);
+  assert.equal(service.reparseFirewallHistory(), false);
+  const retained = service.db.prepare('SELECT raw,received_at,action,dst_port FROM firewall_events WHERE id=?').get(old.lastInsertRowid);
+  assert.deepEqual(Object.values(retained), [nativeDns, receivedAt, 'allow', 53]);
+  assert.equal((await req('/firewall/overview', viewer)).status, 403);
+  const { data: stats } = await req(`/firewall/overview?hours=1&sender=${relayAddress}`, operator);
+  assert.equal(stats.totals.allowed, 2);
+  assert.equal(stats.totals.measured, 2);
+  assert.equal(stats.totals.bytes, 7282);
+  assert.equal(stats.buckets.reduce((sum, row) => sum + row.total, 0), stats.totals.total);
+  assert.equal(stats.top.hosts[0].value, 'cdn.example.test');
+  assert.deepEqual((await events('?hours=1&dstPort=443&application=ssl%2Ftls')).events.map(row => row.host), ['cdn.example.test']);
+  assert.equal((await events('?query=19331&searchRaw=true')).events.length, 0);
+  assert.equal((await events('?query=11111&searchRaw=true')).events.length, 1);
+  const { data: observed } = await req('/firewall/devices?hours=1&scope=lan&sort=bytes', operator);
+  assert.deepEqual(observed.devices.map(device => [device.ip, device.destinations]), [['192.168.99.50', 2]]);
+  const exported = await fetch(`${origin}/api/firewall/events.csv?hours=1&host=cdn.example.test`, { headers: { Cookie: operator.cookie } });
+  assert.equal(exported.status, 200);
+  const csv = await exported.text();
+  assert.equal(csv.split('\r\n').length, 3);
+  assert.match(csv, /cdn\.example\.test/);
+  assert.ok(!csv.includes('proxy_act'));
+
+  const ruleBody = { name: 'DNS volume test', kind: 'traffic', enabled: true, threshold: 2,
+    windowMinutes: 5, cooldownMinutes: 30, filters: { sender: relayAddress, action: 'allow', dstPort: 53 } };
+  assert.equal((await req('/firewall/alert-rules', operator, 'POST', ruleBody)).status, 403);
+  assert.equal((await req('/firewall/alert-rules', admin, 'POST', { ...ruleBody, filters: { unknown: true } })).status, 400);
+  const createdRule = await req('/firewall/alert-rules', admin, 'POST', ruleBody);
+  assert.equal(createdRule.status, 201);
+  const quietAddress = '192.0.2.2';
+  assert.equal((await req(`/firewall/sources/${quietAddress}`, admin, 'PUT', { name: 'Quiet test', enabled: true })).status, 200);
+  assert.equal((await req('/firewall/alert-rules', admin, 'POST', {
+    ...ruleBody, name: 'Firebox quiet', kind: 'silence', windowMinutes: 1, filters: { sender: quietAddress },
+  })).status, 201);
+  assert.equal((await req(relaySource, admin, 'PUT', { name: 'Relay Test', enabled: true })).status, 200);
+  const { data: { key: finalKey } } = await req(keyPath, admin, 'POST', {});
+  await delay(10);
+  const report = [{ id: randomUUID(), raw: nativeDns }, { id: randomUUID(), raw: nativeDns }];
+  assert.equal((await sendRelay(finalKey, report)).body.stored, 2);
+  service.tickFirewall(new Date(Date.now() + 65_000));
+  const { data: inbox } = await req('/firewall/alerts', operator);
+  assert.equal(inbox.open, 2);
+  const thresholdAlert = inbox.alerts.find(alert => alert.ruleId === createdRule.data.id);
+  assert.equal(thresholdAlert.observed, 2, 'historical rows before rule creation are excluded');
+  assert.equal(inbox.alerts.find(alert => alert.kind === 'silence').observed, 1);
+  service.tickFirewall(new Date(Date.now() + 125_000));
+  assert.equal((await req('/firewall/alerts', operator)).data.open, 2);
+  const ackPath = `/firewall/alerts/${thresholdAlert.id}/acknowledge`;
+  assert.equal((await req(ackPath, viewer, 'POST', {})).status, 403);
+  assert.equal((await fetch(origin + '/api' + ackPath, { method: 'POST', headers: {
+    Cookie: operator.cookie, Origin: origin, 'X-CSRF-Token': operator.csrf, 'Content-Type': 'application/json',
+  }, body: '{}' })).status, 204);
+  assert.equal((await req('/firewall/alerts', operator)).data.open, 1);
 });

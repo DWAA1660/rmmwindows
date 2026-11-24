@@ -169,6 +169,28 @@ export function openDatabase(filename) {
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS firewall_events_relay ON firewall_events(sender,relay_id) WHERE relay_id IS NOT NULL;
       PRAGMA user_version=14;`);
   });
+  transaction(db, () => {
+    const eventColumns = new Set(db.prepare('PRAGMA table_info(firewall_events)').all().map(column => column.name));
+    for (const [column, definition] of [
+      ['application', 'TEXT'], ['host', 'TEXT'], ['sent_bytes', 'INTEGER'], ['received_bytes', 'INTEGER'],
+      ['message_id', 'TEXT'], ['parse_version', 'INTEGER NOT NULL DEFAULT 0']
+    ]) {
+      if (!eventColumns.has(column)) db.exec('ALTER TABLE firewall_events ADD COLUMN ' + column + ' ' + definition);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS firewall_events_reparse ON firewall_events(id) WHERE parse_version=0;
+      CREATE TABLE IF NOT EXISTS firewall_alert_rules (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
+        kind TEXT NOT NULL, window_minutes INTEGER NOT NULL, threshold INTEGER NOT NULL, cooldown_minutes INTEGER NOT NULL,
+        filters TEXT NOT NULL, updated_at TEXT NOT NULL, last_notified_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS firewall_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id TEXT NOT NULL, rule_name TEXT NOT NULL, kind TEXT NOT NULL,
+        fired_at TEXT NOT NULL, observed INTEGER NOT NULL, window_minutes INTEGER NOT NULL,
+        threshold INTEGER NOT NULL, filters TEXT NOT NULL, acknowledged_at TEXT, acknowledged_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS firewall_alerts_fired ON firewall_alerts(fired_at);
+      PRAGMA user_version=15;`);
+  });
   return db;
 }
 
