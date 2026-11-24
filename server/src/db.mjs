@@ -147,6 +147,18 @@ export function openDatabase(filename) {
       CREATE INDEX IF NOT EXISTS netscan_jobs_scan ON netscan_jobs(scan_id);
       PRAGMA user_version=12;`);
   });
+  // v13: bounded WatchGuard traffic history, independent of endpoint job output.
+  transaction(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS firewall_sources (
+        address TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL, last_received_at TEXT);
+      CREATE TABLE IF NOT EXISTS firewall_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL REFERENCES firewall_sources(address),
+        received_at TEXT NOT NULL, action TEXT, src_ip TEXT, dst_ip TEXT, protocol TEXT,
+        src_port INTEGER, dst_port INTEGER, policy TEXT, raw TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS firewall_events_received ON firewall_events(received_at);
+      CREATE INDEX IF NOT EXISTS firewall_events_sender ON firewall_events(sender,id DESC);
+      PRAGMA user_version=13;`);
+  });
   return db;
 }
 

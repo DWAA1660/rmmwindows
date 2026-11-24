@@ -106,6 +106,7 @@ export type View =
   | 'endpoints'
   | 'software'
   | 'network'
+  | 'firewall'
   | 'scripts'
   | 'schedules'
   | 'activity'

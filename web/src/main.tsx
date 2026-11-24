@@ -28,6 +28,7 @@ import {
   Power,
   Radar,
   RefreshCw,
+  Router,
   Search,
   Settings2,
   ShieldCheck,
@@ -55,6 +56,7 @@ import { CommandPalette } from './CommandPalette';
 import type { PaletteItem } from './commandPaletteModel';
 import { BulkAgentUpdate } from './BulkAgentUpdate';
 import { NetworkScanner } from './NetworkScanner';
+import { Firewall } from './Firewall';
 import type {
   Audit,
   Chunk,
@@ -483,6 +485,7 @@ function App() {
         { key: 'endpoints', label: 'Endpoints', icon: Monitor, count: active.length },
         { key: 'software', label: 'Software', icon: Package },
         { key: 'network', label: 'Network scanner', icon: Radar },
+        ...(user?.role === 'viewer' ? [] : [{ key: 'firewall' as const, label: 'Firewall', icon: Router }]),
       ],
     },
     {
@@ -532,6 +535,10 @@ function App() {
       title: 'Network scanner',
       subtitle: 'Verify reachability, open ports, and firewall isolation from library endpoints.',
     },
+    firewall: {
+      title: 'Firewall',
+      subtitle: 'WatchGuard Firebox traffic and log sources.',
+    },
     scripts: {
       title: 'Script library',
       subtitle: 'Reusable PowerShell routines ready for ad-hoc execution or scheduling.',
@@ -559,7 +566,7 @@ function App() {
   };
 
   const paletteItems: PaletteItem[] = [
-    ...(Object.keys(pageInfo) as View[]).map((key) => ({
+    ...(Object.keys(pageInfo) as View[]).filter(key => key !== 'firewall' || user?.role !== 'viewer').map((key) => ({
       id: 'page:' + key,
       kind: 'page' as const,
       title: pageInfo[key].title,
@@ -941,6 +948,10 @@ function App() {
                 })
               }
             />
+          )}
+
+          {view === 'firewall' && user.role !== 'viewer' && (
+            <Firewall request={api} canManage={user.role === 'admin'} />
           )}
 
           {view === 'schedules' && (
