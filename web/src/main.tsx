@@ -952,7 +952,7 @@ function App() {
           )}
 
           {view === 'firewall' && user.role !== 'viewer' && (
-            <Firewall request={api} canManage={user.role === 'admin'} />
+            <Firewall request={api} canManage={user.role === 'admin'} onOpenScanner={() => changeView('network')} />
           )}
 
           {view === 'schedules' && (

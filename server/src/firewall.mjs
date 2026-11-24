@@ -5,6 +5,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transaction } from './db.mjs';
 import { equalText, hashToken, randomToken } from './security.mjs';
+import { parseTraffic } from './firewall-parser.mjs';
+import { createFirewallMonitor, timeWindow, trafficFilters, trafficWhere } from './firewall-monitor.mjs';
 
 const retentionDays = 7;
 const maxEvents = 50_000;
@@ -20,32 +22,22 @@ const isTraffic = raw => {
   return priority !== undefined && Math.floor(Number(priority) / 8) === 17;
 };
 
-function port(value) {
-  return value && /^\d{1,5}$/.test(value) && Number(value) <= 65535 ? Number(value) : null;
-}
-
-export function parseTraffic(raw) {
-  const message = raw.replace(/^<\d{1,3}>/, '').trim();
-  // Traffic Monitor format: disposition, addresses, service/protocol, optional ports.
-  const modern = /(?:^|\s)(Allow|Deny)\s+(\S+)\s+(\S+)\s+([\w.+/-]+)\s*(.*)$/i.exec(message);
-  // Older packet filter format: disposition, interfaces, packet length, protocol,
-  // IP header length, TTL, addresses (optionally annotated with |username), ports.
-  const legacy = /(?:^|\s)(Allow|Deny)\s+\S+\s+\S+\s+\d+\s+([\w.+/-]+)\s+\d+\s+\d+\s+(\S+)\s+(\S+)\s*(.*)$/i.exec(message);
-  const matches = modern ? [modern] : [];
-  if (legacy) matches.push([legacy[0], legacy[1], legacy[3], legacy[4], legacy[2], legacy[5]]);
-  for (const [, disposition, source, destination, service, tail] of matches) {
-    const [srcIp] = source.split('|');
-    const [dstIp] = destination.split('|');
-    if (!isIP(srcIp) || !isIP(dstIp)) continue;
-    const protocol = service.split('/').at(-1).toLowerCase();
-    const ports = /^(\d+)\s+(\d+)(?:\s|$)/.exec(tail);
-    const policy = /(?:^|\s)\(([^()]{1,200})\)(?=\s*(?:[\w-]+=|$))/.exec(tail)?.[1] ?? null;
-    return { action: disposition.toLowerCase(), srcIp, dstIp, protocol, srcPort: port(ports?.[1]), dstPort: port(ports?.[2]), policy };
-  }
-  return { action: null, srcIp: null, dstIp: null, protocol: null, srcPort: null, dstPort: null, policy: null };
-}
+const parsedColumns = 'action,src_ip,dst_ip,protocol,src_port,dst_port,policy,application,host,sent_bytes,received_bytes,message_id';
+const parsedValues = parsed => [
+  parsed?.action, parsed?.srcIp, parsed?.dstIp, parsed?.protocol, parsed?.srcPort, parsed?.dstPort,
+  parsed?.policy, parsed?.application, parsed?.host, parsed?.sentBytes, parsed?.receivedBytes, parsed?.messageId,
+].map(value => value ?? null);
+const eventColumns = `id,sender,received_at AS receivedAt,action,src_ip AS srcIp,dst_ip AS dstIp,
+  protocol,src_port AS srcPort,dst_port AS dstPort,policy,application,host,sent_bytes AS sentBytes,
+  received_bytes AS receivedBytes,message_id AS messageId`;
+const csvCell = value => {
+  const text = String(value ?? '');
+  const safe = /^[\s\u0000-\u001f]*[=+@-]/.test(text) || /^[\t\r\n]/.test(text) ? "'" + text : text;
+  return '"' + safe.replaceAll('"', '""') + '"';
+};
 
 export function createFirewall({ db, env, audit, fail, str, downloadDirectory }) {
+  const monitor = createFirewallMonitor({ db, audit, fail, str });
   const configuredPort = env.FIREWALL_SYSLOG_PORT;
   const relayEnabled = env.FIREWALL_HTTPS_RELAY === 'true';
   const relayInstaller = resolve(downloadDirectory || fileURLToPath(new URL('../../downloads/', import.meta.url)),
@@ -56,13 +48,17 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
   let receiver = configuredPort ? 'starting' : 'disabled';
   let socket;
   let timer;
+  let reparseTimer;
   let nextPrune = 0;
   let rejected = 0;
   let dropped = 0;
   let lastStorageError = null;
   const cutoff = () => new Date(Date.now() - retentionDays * 86400000).toISOString();
   const insert = db.prepare(`INSERT INTO firewall_events
-    (sender,received_at,action,src_ip,dst_ip,protocol,src_port,dst_port,policy,raw,relay_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    (sender,received_at,raw,relay_id,${parsedColumns},parse_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)`);
+  const pending = db.prepare('SELECT id,raw FROM firewall_events WHERE parse_version=0 ORDER BY id LIMIT 500');
+  const reparse = db.prepare(`UPDATE firewall_events SET (${parsedColumns})=(?,?,?,?,?,?,?,?,?,?,?,?),parse_version=1 WHERE id=?`);
+  const markParsed = db.prepare('UPDATE firewall_events SET parse_version=1 WHERE id=?');
   const findRelayEvent = db.prepare('SELECT 1 FROM firewall_events WHERE sender=? AND relay_id=?');
   const updateReceived = db.prepare('UPDATE firewall_sources SET last_received_at=? WHERE address=?');
   const relaySource = db.prepare('SELECT enabled,relay_key_hash FROM firewall_sources WHERE address=?');
@@ -91,8 +87,7 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
       const lastSeen = new Map();
       for (const { raw, sender, receivedAt, relayId = null } of batch) {
         if (relayId && findRelayEvent.get(sender, relayId)) continue;
-        const { action, srcIp, dstIp, protocol, srcPort, dstPort, policy } = parseTraffic(raw);
-        lastId = insert.run(sender, receivedAt, action, srcIp, dstIp, protocol, srcPort, dstPort, policy, raw, relayId).lastInsertRowid;
+        lastId = insert.run(sender, receivedAt, raw, relayId, ...parsedValues(parseTraffic(raw))).lastInsertRowid;
         stored++;
         lastSeen.set(sender, receivedAt);
       }
@@ -101,6 +96,19 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
       if (prune) expire.run(cutoff());
       return stored;
     });
+  }
+
+  function reparseHistory() {
+    const rows = pending.all();
+    if (!rows.length) return false;
+    transaction(db, () => {
+      for (const { id, raw } of rows) {
+        const result = parseTraffic(raw);
+        if (result) reparse.run(...parsedValues(result), id);
+        else markParsed.run(id);
+      }
+    });
+    return true;
   }
 
   function flush(size = 250) {
@@ -124,6 +132,15 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
     flush();
     timer = setInterval(flush, 250);
     timer.unref();
+    reparseTimer = setInterval(() => {
+      try {
+        if (!reparseHistory()) clearInterval(reparseTimer);
+      } catch (error) {
+        console.error('Firewall history parser failed:', error.message);
+        clearInterval(reparseTimer);
+      }
+    }, 1000);
+    reparseTimer.unref();
     if (!configuredPort) return;
     const host = env.FIREWALL_SYSLOG_HOST || '127.0.0.1';
     if (!/^\d+$/.test(configuredPort) || listenPort < 1024 || listenPort > 65535 || isIP(host) !== 4) {
@@ -146,6 +163,7 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
   function stop() {
     if (!timer) return;
     clearInterval(timer);
+    clearInterval(reparseTimer);
     timer = undefined;
     socket?.close();
     socket = undefined;
@@ -189,6 +207,7 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
       if (req.operator.role === 'viewer') return res.status(403).json({ error: 'Operator access required.' });
       next();
     });
+    monitor.mount(router);
     router.get('/firewall', (req, res) => {
       res.json({ receiver, relayEnabled, rejected, dropped, lastStorageError, retentionDays, maxEvents, sources: listSources() });
     });
@@ -236,32 +255,38 @@ export function createFirewall({ db, env, audit, fail, str, downloadDirectory })
       else sources.delete(address);
       res.json({ sources: listSources() });
     });
-    router.get('/firewall/events', (req, res) => {
-      const { sender, action, query, before } = req.query;
-      if (sender !== undefined && (typeof sender !== 'string' || isIP(sender) !== 4)) fail(400, 'Invalid sender.');
-      if (action !== undefined && !['allow', 'deny', 'unparsed'].includes(action)) fail(400, 'Invalid traffic action.');
+    function eventQuery(input, paginate) {
+      const { query, before } = input;
       if (query !== undefined && (typeof query !== 'string' || query.length > 100)) fail(400, 'Search is limited to 100 characters.');
       if (before !== undefined && (typeof before !== 'string' || !/^[1-9]\d*$/.test(before) || !Number.isSafeInteger(Number(before))))
         fail(400, 'Invalid page cursor.');
-      const where = ['received_at >= ?'];
-      const args = [cutoff()];
-      if (before !== undefined) { where.push('id < ?'); args.push(Number(before)); }
-      if (sender !== undefined) { where.push('sender = ?'); args.push(sender); }
-      if (action === 'unparsed') where.push('action IS NULL');
-      else if (action !== undefined) { where.push('action = ?'); args.push(action); }
+      const range = timeWindow(input.hours ?? '168', fail);
+      const { clauses, args } = trafficWhere(trafficFilters(input, fail), range.from, range.to);
+      if (paginate && before !== undefined) { clauses.push('id < ?'); args.push(Number(before)); }
       if (query?.trim()) {
         const term = `%${query.trim().replace(/[\\%_]/g, '\\$&')}%`;
-        where.push(`(src_ip LIKE ? ESCAPE '\\' OR dst_ip LIKE ? ESCAPE '\\' OR policy LIKE ? ESCAPE '\\')`);
-        args.push(term, term, term);
+        const searchColumns = ['src_ip', 'dst_ip', 'policy', 'application', 'host', 'message_id'];
+        if (input.searchRaw === 'true' && query.trim().length >= 3) searchColumns.push('raw');
+        clauses.push(`(${searchColumns.map(column => `${column} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
+        args.push(...searchColumns.map(() => term));
       }
-      const events = db.prepare(`SELECT id,sender,received_at AS receivedAt,action,src_ip AS srcIp,dst_ip AS dstIp,
-        protocol,src_port AS srcPort,dst_port AS dstPort,policy,raw FROM firewall_events
-        WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args, pageSize + 1);
+      const columns = paginate ? eventColumns + ',raw' : eventColumns;
+      return db.prepare(`SELECT ${columns} FROM firewall_events
+        WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args, paginate ? pageSize + 1 : 5000);
+    }
+    router.get('/firewall/events', (req, res) => {
+      const events = eventQuery(req.query, true);
       const nextBefore = events.length > pageSize ? events[pageSize - 1].id : null;
       if (nextBefore !== null) events.pop();
       res.json({ events, nextBefore });
     });
+    router.get('/firewall/events.csv', (req, res) => {
+      const rows = eventQuery(req.query, false);
+      const header = 'id,sender,receivedAt,action,srcIp,dstIp,protocol,srcPort,dstPort,policy,application,host,sentBytes,receivedBytes,messageId';
+      res.attachment('firewall-traffic.csv').type('text/csv').send(header + '\r\n' +
+        rows.map(row => Object.values(row).map(csvCell).join(',')).join('\r\n') + '\r\n');
+    });
   }
 
-  return { start, stop, mount, authorizeRelay, ingestRelay };
+  return { start, stop, mount, authorizeRelay, ingestRelay, tick: monitor.tick, reparseHistory };
 }

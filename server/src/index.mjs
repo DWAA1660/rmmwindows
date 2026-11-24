@@ -19,6 +19,7 @@ service.attachSupport(listener);
 service.startFirewall();
 const scheduler = setInterval(() => {
   try { service.tickSchedules(); } catch (error) { console.error('Scheduler failure:', error.message); }
+  try { service.tickFirewall(); } catch (error) { console.error('Firewall alert evaluation failed:', error.message); }
 }, 15000);
 scheduler.unref();
 let stopping = false;
