@@ -37,6 +37,17 @@
 .firewall-action.allow { color: var(--success, #176044); }
 .firewall-action.deny { color: var(--danger, #ab2e3a); }
 
+.firewall-relay {
+  display: grid;
+  gap: 10px;
+}
+
+.firewall-relay input {
+  display: block;
+  width: min(100%, 28rem);
+  margin-top: 5px;
+}
+
 .firewall-raw summary {
   cursor: pointer;
   white-space: nowrap;

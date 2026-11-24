@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createSocket } from 'node:dgram';
+import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { createApp } from '../src/app.mjs';
@@ -13,7 +14,7 @@ test('Firebox traffic flows from a registered UDP sender to authorized, paginate
 
   const password = 'isolated-firewall-password';
   const service = createApp({ databasePath: ':memory:', env: {
-    ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: password, FIREWALL_SYSLOG_PORT: String(udpPort)
+    ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: password, FIREWALL_SYSLOG_PORT: String(udpPort), FIREWALL_HTTPS_RELAY: 'true'
   } });
   const server = await listen(service.app);
   const client = createSocket('udp4');
@@ -109,4 +110,42 @@ test('Firebox traffic flows from a registered UDP sender to authorized, paginate
   await waitFor(snapshot => snapshot.rejected === 4);
   assert.equal((await events('?action=deny')).events.length, 2);
   assert.equal(service.db.prepare("SELECT count(*) AS n FROM audit WHERE action='firewall.source.saved'").get().n, 2);
+
+  const relayAddress = '192.0.2.1';
+  const relaySource = `/firewall/sources/${relayAddress}`;
+  const keyPath = relaySource + '/relay-key';
+  assert.equal((await req(relaySource, admin, 'PUT', { name: 'Relay Test', enabled: true })).status, 200);
+  assert.equal((await req(keyPath, operator, 'POST', {})).status, 403);
+  assert.equal((await req(keyPath, { cookie: admin.cookie }, 'POST', {})).status, 403);
+  const { data: { key } } = await req(keyPath, admin, 'POST', {});
+  assert.match(key, /^[\w-]{43}$/);
+  const sendRelay = async (relayKey, batch, address = relayAddress) => {
+    const response = await fetch(`${origin}/api/firewall/relay/${address}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${relayKey}` },
+      body: JSON.stringify({ events: batch })
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const batch = [{ id: randomUUID(), raw: deny }, { id: randomUUID(), raw: '<150>Non-traffic' }];
+  assert.equal((await sendRelay('invalid', batch)).status, 401);
+  assert.equal((await sendRelay(key, batch, '127.0.0.1')).status, 401);
+  assert.equal((await sendRelay(key, [{ id: 'invalid', raw: allow }])).status, 400);
+  assert.deepEqual((await sendRelay(key, batch)).body, { acknowledged: 2, stored: 1, ignored: 1 });
+  assert.deepEqual((await sendRelay(key, batch)).body, { acknowledged: 2, stored: 0, ignored: 1 });
+  assert.equal((await events(`?sender=${relayAddress}`)).events[0].raw, deny);
+  const snapshot = await status();
+  assert.equal(snapshot.relayEnabled, true);
+  assert.equal(snapshot.sources.find(item => item.address === relayAddress).hasRelayKey, true);
+  assert.ok(!JSON.stringify(snapshot).includes(key));
+  assert.ok(!JSON.stringify(service.db.prepare('SELECT * FROM audit').all()).includes(key));
+  assert.equal((await req(relaySource, admin, 'PUT', { name: 'Relay Test', enabled: false })).status, 200);
+  assert.deepEqual((await sendRelay(key, batch)).body, { acknowledged: 2, stored: 0, ignored: 2 });
+  const { data: { key: replacement } } = await req(keyPath, admin, 'POST', {});
+  assert.equal((await sendRelay(key, batch)).status, 401);
+  const revoked = await fetch(`${origin}/api${keyPath}`, {
+    method: 'DELETE', headers: { Origin: origin, Cookie: admin.cookie, 'X-CSRF-Token': admin.csrf }
+  });
+  assert.equal(revoked.status, 204);
+  assert.equal((await sendRelay(replacement, batch)).status, 401);
 });

@@ -159,6 +159,16 @@ export function openDatabase(filename) {
       CREATE INDEX IF NOT EXISTS firewall_events_sender ON firewall_events(sender,id DESC);
       PRAGMA user_version=13;`);
   });
+  transaction(db, () => {
+    const columns = db.prepare('PRAGMA table_info(firewall_sources)').all();
+    if (!columns.some(column => column.name === 'relay_key_hash'))
+      db.exec('ALTER TABLE firewall_sources ADD COLUMN relay_key_hash TEXT');
+    const eventColumns = db.prepare('PRAGMA table_info(firewall_events)').all();
+    if (!eventColumns.some(column => column.name === 'relay_id'))
+      db.exec('ALTER TABLE firewall_events ADD COLUMN relay_id TEXT');
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS firewall_events_relay ON firewall_events(sender,relay_id) WHERE relay_id IS NOT NULL;
+      PRAGMA user_version=14;`);
+  });
   return db;
 }
 

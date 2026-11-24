@@ -70,6 +70,10 @@ Image rollback does not automatically undo database migrations. Changes must be 
 
 ## WatchGuard firewall traffic
 
+Use the Windows relay when the RMM host has a public address and the Firebox has no private route to it. Add `FIREWALL_HTTPS_RELAY=true` to the host's existing `/opt/library-rmm/.env` and use the scoped updater to recreate RMM. In **Fleet → Firewall**, add the Firebox's LAN sender IP, open **Relay setup** to generate its key, and download **Windows relay installer**. Follow the [installer readme](../installer/FirewallRelay-README.md) on the Windows relay PC. The cloud host needs its existing HTTPS ingress only.
+
+### Direct syslog on a private route
+
 1. Deploy the updated app and choose a trusted LAN or VPN address on the RMM host that the Firebox can reach. Verify UDP 5514 is available there. Use a network ACL or Docker-aware ingress filter permitting UDP 5514 only from the Firebox sender addresses. Keep syslog off public interfaces.
 2. Merge the `rmm.ports` entry and `rmm.environment` keys from `deploy/firewall.compose.yml` into the reviewed `/opt/library-rmm/compose.yml`. Preserve its existing HTTP port and environment keys. Set `RMM_SYSLOG_BIND_IP` to the trusted address in the Compose `.env`. Validate the merged configuration and recreate only the `rmm` service through the usual scoped update process. Keeping the entries in the reviewed file carries them forward through future updates. A direct Node installation can set `FIREWALL_SYSLOG_PORT` to a port in 1024–65535 and `FIREWALL_SYSLOG_HOST` to the IPv4 bind address. The default bind is loopback. Leaving the port unset disables the listener.
 3. As an administrator, open **Fleet → Firewall** and use **Add Firebox** with the Firebox sender address as seen by the collector. Confirm **Receiver listening**.

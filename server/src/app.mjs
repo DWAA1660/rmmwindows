@@ -182,14 +182,18 @@ export function createApp(options = {}) {
     if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
     next();
   });
+  const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
+  const firewall = createFirewall({ db, env, audit, fail, str,
+    downloadDirectory: options.downloadDirectory || env.AGENT_DOWNLOAD_DIRECTORY });
+  app.post('/api/firewall/relay/:address', firewall.authorizeRelay, rateLimiter({
+    limit: 120, intervalMs: 60_000, key: req => req.params.address
+  }), express.json({ limit: '256kb' }), firewall.ingestRelay);
   app.use(express.json({ limit: '2mb', strict: true }));
   const downloads = mountAgentDownloads(app, { env, directory: options.downloadDirectory, bootstrapPath: options.bootstrapPath });
   // Agent file-download chunks and console upload chunks are the only raw (non-JSON) bodies; their
   // routes parse them themselves, after authentication (and CSRF for the console).
   const rawFileChunk = req => req.method === 'PUT' && (/^\/agent\/jobs\/[^/]+\/file\/\d+$/.test(req.path) || /^\/uploads\/[^/]+\/chunks\/\d+$/.test(req.path)) && req.is('application/octet-stream');
   app.use('/api', (req, res, next) => { if (['POST', 'PUT', 'PATCH'].includes(req.method) && !object(req.body) && !rawFileChunk(req)) return res.status(400).json({ error: 'A JSON object body is required.' }); next(); });
-  const audit = (actor, action, target, details = {}) => db.prepare('INSERT INTO audit(id,actor,action,target,details,created_at) VALUES (?,?,?,?,?,?)').run(randomUUID(), actor, action, target || null, JSON.stringify(details), nowIso());
-  const firewall = createFirewall({ db, env, audit, fail, str });
   const updateHealth = mountUpdateHealth({ db, audit, fail, str });
   const isHttpsRequest = req => Boolean(secureCookie || req.secure || req.get('x-forwarded-proto')?.split(',')[0].trim() === 'https');
   const expectedOrigin = req => {

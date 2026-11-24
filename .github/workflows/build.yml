@@ -58,6 +58,9 @@ jobs:
       - name: Verify website installer bootstrap
         shell: powershell
         run: ./installer/Test-Bootstrap.ps1
+      - name: Verify Windows firewall relay
+        shell: powershell
+        run: ./installer/Test-FirewallRelay.ps1
       - name: Verify real agent/API integration
         run: node deploy/test-agent-integration.mjs
       - uses: actions/upload-artifact@v4

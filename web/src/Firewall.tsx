@@ -3,9 +3,10 @@ import { RefreshCw } from 'lucide-react';
 import './Firewall.css';
 
 type Request = <T>(path: string, method?: string, body?: unknown) => Promise<T>;
-type Source = { address: string; name: string; enabled: boolean; lastReceivedAt: string | null };
+type Source = { address: string; name: string; enabled: boolean; lastReceivedAt: string | null; hasRelayKey: boolean };
 type Status = {
   receiver: 'starting' | 'listening' | 'disabled' | 'error';
+  relayEnabled: boolean;
   sources: Source[];
   rejected: number;
   dropped: number;
@@ -22,7 +23,7 @@ type Page = { events: TrafficEvent[]; nextBefore: number | null };
 const receiverLabel: Record<Status['receiver'], string> = {
   starting: 'Receiver starting', listening: 'Receiver listening', disabled: 'Receiver disabled', error: 'Receiver failed to start',
 };
-const newSource = { address: '', name: '', enabled: true, lastReceivedAt: null };
+const newSource = { address: '', name: '', enabled: true, lastReceivedAt: null, hasRelayKey: false };
 const formatTime = (value: string) => new Date(value).toLocaleString();
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Firewall request failed.';
 
@@ -47,6 +48,10 @@ export function Firewall({ request, canManage }: { request: Request; canManage: 
   const [editingExisting, setEditingExisting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [relaySource, setRelaySource] = useState<Source | null>(null);
+  const [relayKey, setRelayKey] = useState('');
+  const [relayMessage, setRelayMessage] = useState('');
+  const [relayBusy, setRelayBusy] = useState(false);
   const before = cursors.at(-1);
 
   useEffect(() => {
@@ -94,11 +99,36 @@ export function Firewall({ request, canManage }: { request: Request; canManage: 
     }
   }
 
+  async function changeRelayKey(revoke = false) {
+    if (!relaySource || relayBusy) return;
+    setRelayBusy(true);
+    setRelayKey('');
+    setRelayMessage('');
+    try {
+      const path = `/firewall/sources/${encodeURIComponent(relaySource.address)}/relay-key`;
+      if (revoke) {
+        await request(path, 'DELETE');
+        setRelayMessage('Relay key revoked.');
+      } else {
+        const result = await request<{ key: string }>(path, 'POST', {});
+        setRelayKey(result.key);
+      }
+      setRelaySource({ ...relaySource, hasRelayKey: !revoke });
+      setRefresh(value => value + 1);
+    } catch (err) {
+      setRelayMessage(errorText(err));
+    } finally {
+      setRelayBusy(false);
+    }
+  }
+
   return <div className="firewall">
     <section className="panel">
       <div className="panel-heading">
-        <div><h2>Fireboxes</h2><p aria-live="polite">{status ? receiverLabel[status.receiver] : 'Syslog receiver status'}</p></div>
+        <div><h2>Fireboxes</h2><p aria-live="polite">{status ? [status.relayEnabled && 'HTTPS relay enabled',
+          (!status.relayEnabled || status.receiver !== 'disabled') && receiverLabel[status.receiver]].filter(Boolean).join(' · ') : 'Syslog receiver status'}</p></div>
         <div className="firewall-actions">
+          {canManage && status?.relayEnabled && <a className="button secondary small" href="/api/firewall/relay-installer">Windows relay installer</a>}
           <button type="button" className="button secondary small" disabled={loading} onClick={() => { setCursors([]); setRefresh(value => value + 1); }}>
             <RefreshCw size={15} /> Refresh
           </button>
@@ -106,7 +136,7 @@ export function Firewall({ request, canManage }: { request: Request; canManage: 
         </div>
       </div>
       {error && <p role="alert" className="firewall-message">{error}</p>}
-      {status?.receiver === 'disabled' && <p className="firewall-message muted">Enable the syslog receiver on the RMM host to start collecting traffic.</p>}
+      {status?.receiver === 'disabled' && !status.relayEnabled && <p className="firewall-message muted">Enable the syslog receiver on the RMM host to start collecting traffic.</p>}
       {status?.receiver === 'error' && <p className="firewall-message" role="alert">Check the RMM server logs for the syslog bind error.</p>}
       {status && (status.rejected > 0 || status.dropped > 0 || status.lastStorageError) && <p className="firewall-message muted">
         Since restart, {status.rejected.toLocaleString()} datagrams rejected and {status.dropped.toLocaleString()} dropped by the collector.
@@ -117,7 +147,12 @@ export function Firewall({ request, canManage }: { request: Request; canManage: 
         <tbody>{status.sources.map(source => <tr key={source.address}>
           <td>{source.name}</td><td><code>{source.address}</code></td><td>{source.enabled ? 'Enabled' : 'Paused'}</td>
           <td>{source.lastReceivedAt ? formatTime(source.lastReceivedAt) : 'No logs received'}</td>
-          {canManage && <td><button type="button" className="button secondary small" disabled={saving} aria-label={`Edit ${source.name}`} onClick={() => edit(source)}>Edit</button></td>}
+          {canManage && <td><div className="firewall-actions">
+            <button type="button" className="button secondary small" disabled={saving} aria-label={`Edit ${source.name}`} onClick={() => edit(source)}>Edit</button>
+            {status.relayEnabled && <button type="button" className="button secondary small" disabled={relayBusy} aria-label={`Relay setup for ${source.name}`} onClick={() => {
+              setRelaySource(source); setRelayKey(''); setRelayMessage('');
+            }}>Relay setup</button>}
+          </div></td>}
         </tr>)}</tbody>
       </table></div> : status && <p className="firewall-message muted">No Fireboxes registered. Add the sender IPv4 address seen by the RMM receiver.</p>}
       {editing && <form className="firewall-form" onSubmit={save}>
@@ -130,6 +165,20 @@ export function Firewall({ request, canManage }: { request: Request; canManage: 
         </div>
         {saveError && <p role="alert">{saveError}</p>}
       </form>}
+      {relaySource && <div className="firewall-message firewall-relay">
+        <h3>Relay setup for {relaySource.name}</h3>
+        <p className="muted">Enter {relaySource.address} as the Firebox address when running the Windows relay installer.</p>
+        {relaySource.hasRelayKey && !relayKey && <p>Replacing or revoking the key will disconnect any relay using it.</p>}
+        {relayKey && <label>Relay key shown once<input readOnly value={relayKey} onFocus={event => event.currentTarget.select()} /></label>}
+        {relayMessage && <p role="status">{relayMessage}</p>}
+        <div className="firewall-actions">
+          {!relayKey && <button type="button" className="button primary small" disabled={relayBusy} onClick={() => void changeRelayKey()}>
+            {relaySource.hasRelayKey ? 'Replace relay key' : 'Generate relay key'}
+          </button>}
+          {relaySource.hasRelayKey && !relayKey && <button type="button" className="button secondary small" disabled={relayBusy} onClick={() => void changeRelayKey(true)}>Revoke relay key</button>}
+          <button type="button" className="button secondary small" disabled={relayBusy} onClick={() => { setRelaySource(null); setRelayKey(''); }}>Done</button>
+        </div>
+      </div>}
     </section>
     <section className="panel" aria-busy={loading}>
       <div className="panel-heading"><div><h2>Traffic logs</h2>

@@ -8,6 +8,8 @@ A bounded queue batches writes into additive SQLite schema 13. The store retains
 
 Fleet → Firewall lets operators and administrators read traffic. Administrators can register, rename, and pause sender addresses with audited changes. Fireware or WatchGuard Cloud remains the interface for editing appliance policies. See [deployment setup](DEPLOYMENT.md#watchguard-firewall-traffic).
 
+For off-site hosting, the optional Windows relay listens on a specific LAN IPv4 address and sends batches over authenticated HTTPS. The scheduled task runs under Local Service. Each installed relay listens for one Firebox source address and uses a revocable key scoped to that Firebox in RMM. The server stores only a key hash. RMM uses each relay event UUID to suppress duplicate writes within retained history. The Windows relay has a bounded in-memory queue and keeps summary counters in a local status file. Restarting Windows clears that queue.
+
 ## Initial design — 2026-11-04
 
 Self-hosted Linux application at https://rmm.parkcountylibrary.org. Node 24 LTS/Express API with SQLite WAL durable state, React/Vite console, .NET 10 LTS Windows worker service installed as LocalSystem. Agents make outbound HTTPS requests only. SQLite and output live in a persistent Docker bind mount. Existing host websites must remain operational.
