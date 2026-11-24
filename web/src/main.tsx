@@ -234,7 +234,8 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [view, setView] = useState<View>('overview');
+  const [selectedView, setView] = useState<View>('overview');
+  const view = selectedView === 'firewall' && user?.role === 'viewer' ? 'overview' : selectedView;
 
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
